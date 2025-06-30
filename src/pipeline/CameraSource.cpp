@@ -851,14 +851,66 @@ bool CameraSource::linkElements(const CameraConfig& config) {
         }
         LOG_INFO("연결: osd -> converter4 ✓");
 
-        GstElement* fakesink = gst_element_factory_make("fakesink", nullptr);
-        gst_bin_add(GST_BIN(pipeline_), fakesink);
-        
-        if (!gst_element_link(elements_.converter4, fakesink)) {
-            LOG_ERROR("Failed to link converter4 to fakesink");
+        char main_tee_name[32];
+        snprintf(main_tee_name, sizeof(main_tee_name), "main_tee_%d", index_);
+
+        GstElement* main_tee = gst_element_factory_make("tee", main_tee_name);
+        g_object_set(main_tee, "allow-not-linked", TRUE, NULL);
+        gst_bin_add(GST_BIN(pipeline_), main_tee);
+
+        gst_element_link(elements_.converter4, main_tee);
+
+        // 고유한 이름으로 변경
+        char fakesink_queue_name[32];
+        char fakesink_name[32];
+        snprintf(fakesink_queue_name, sizeof(fakesink_queue_name), "fakesink_queue_%d", index_);
+        snprintf(fakesink_name, sizeof(fakesink_name), "fakesink_%d", index_);
+
+        GstElement* fakesink_queue = gst_element_factory_make("queue", fakesink_queue_name);
+        GstElement* fakesink = gst_element_factory_make("fakesink", fakesink_name);
+
+        if (!fakesink_queue || !fakesink) {
+            LOG_ERROR("Failed to create fakesink elements");
             return false;
         }
-        LOG_INFO("연결: converter4 -> fakesink ✓ (테스트용)");
+
+        g_object_set(fakesink_queue, "max-size-buffers", 1, "leaky", 2, NULL);
+        g_object_set(fakesink, "sync", FALSE, NULL);
+
+        // 개별적으로 추가
+        if (!gst_bin_add(GST_BIN(pipeline_), fakesink_queue)) {
+            LOG_ERROR("Failed to add fakesink_queue to pipeline");
+            gst_object_unref(fakesink_queue);
+            gst_object_unref(fakesink);
+            return false;
+        }
+
+        if (!gst_bin_add(GST_BIN(pipeline_), fakesink)) {
+            LOG_ERROR("Failed to add fakesink to pipeline");
+            gst_object_unref(fakesink);
+            return false;
+        }
+
+        // Tee -> fakesink 연결
+        GstPad* tee_src = gst_element_get_request_pad(main_tee, "src_%u");
+        GstPad* queue_sink = gst_element_get_static_pad(fakesink_queue, "sink");
+
+        if (!tee_src || !queue_sink) {
+            LOG_ERROR("Failed to get pads");
+            if (tee_src) gst_object_unref(tee_src);
+            if (queue_sink) gst_object_unref(queue_sink);
+            return false;
+        }
+
+        gst_pad_link(tee_src, queue_sink);
+        gst_object_unref(tee_src);
+        gst_object_unref(queue_sink);
+
+        gst_element_link(fakesink_queue, fakesink);
+
+        // 멤버 변수에 저장
+        elements_.main_tee = main_tee;
+
         LOG_INFO("추론 체인 연결 완료");
     }
 
@@ -886,101 +938,6 @@ bool CameraSource::addProbes() {
             return GST_PAD_PROBE_OK;
         }, this, nullptr);
     
-    // 2. 디코더 이후 프로브 추가
-    if (elements_.decoder) {
-        GstPad* decoder_src_pad = gst_element_get_static_pad(elements_.decoder, "src");
-        if (decoder_src_pad) {
-            gst_pad_add_probe(decoder_src_pad, GST_PAD_PROBE_TYPE_BUFFER,
-                [](GstPad* pad, GstPadProbeInfo* info, gpointer data) -> GstPadProbeReturn {
-                    CameraSource* self = static_cast<CameraSource*>(data);
-                    static guint64 count[2] = {0, 0};
-                    count[self->index_]++;
-                    if (count[self->index_] % 30 == 0) {
-                        LOG_INFO("[Camera %d] 디코더 출력: %llu 프레임", 
-                                self->index_, count[self->index_]);
-                    }
-                    return GST_PAD_PROBE_OK;
-                }, this, nullptr);
-            gst_object_unref(decoder_src_pad);
-        }
-    }
-
-    if (elements_.queue2) {
-        // src pad 프로브도 추가
-        GstPad* queue2_src = gst_element_get_static_pad(elements_.queue2, "src");
-        if (queue2_src) {
-            gst_pad_add_probe(queue2_src, GST_PAD_PROBE_TYPE_BUFFER,
-                [](GstPad* pad, GstPadProbeInfo* info, gpointer data) -> GstPadProbeReturn {
-                    CameraSource* self = static_cast<CameraSource*>(data);
-                    static guint64 count[2] = {0, 0};
-                    count[self->index_]++;
-                    if (count[self->index_] % 30 == 0) {
-                        LOG_INFO("[Camera %d] Queue2 출력: %llu 프레임", 
-                                self->index_, count[self->index_]);
-                    }
-                    return GST_PAD_PROBE_OK;
-                }, this, nullptr);
-            gst_object_unref(queue2_src);
-        }
-    }
-
-    // 3. Tee 직전 프로브 추가
-    if (elements_.tee) {
-        GstPad* tee_sink_pad = gst_element_get_static_pad(elements_.tee, "sink");
-        if (tee_sink_pad) {
-            gst_pad_add_probe(tee_sink_pad, GST_PAD_PROBE_TYPE_BUFFER,
-                [](GstPad* pad, GstPadProbeInfo* info, gpointer data) -> GstPadProbeReturn {
-                    CameraSource* self = static_cast<CameraSource*>(data);
-                    static guint64 count[2] = {0, 0};
-                    count[self->index_]++;
-                    if (count[self->index_] % 30 == 0) {
-                        LOG_INFO("[Camera %d] Tee 입력: %llu 프레임", 
-                                self->index_, count[self->index_]);
-                    }
-                    return GST_PAD_PROBE_OK;
-                }, this, nullptr);
-            gst_object_unref(tee_sink_pad);
-        }
-    }
-    
-// 4. 추론 체인 입구 확인
-    if (config_.inference.enabled && elements_.queue2) {
-        GstPad* infer_queue_sink = gst_element_get_static_pad(elements_.queue2, "sink");
-        if (infer_queue_sink) {
-            gst_pad_add_probe(infer_queue_sink, GST_PAD_PROBE_TYPE_BUFFER,
-                [](GstPad* pad, GstPadProbeInfo* info, gpointer data) -> GstPadProbeReturn {
-                    CameraSource* self = static_cast<CameraSource*>(data);
-                    static guint64 count[2] = {0, 0};
-                    count[self->index_]++;
-                    if (count[self->index_] % 30 == 0) {
-                        LOG_INFO("[Camera %d] 추론 큐 입력: %llu 프레임", 
-                                self->index_, count[self->index_]);
-                    }
-                    return GST_PAD_PROBE_OK;
-                }, this, nullptr);
-            gst_object_unref(infer_queue_sink);
-        }
-    }
-    
-    // 5. Mux 출력 확인
-    if (config_.inference.enabled && elements_.mux) {
-        GstPad* mux_src = gst_element_get_static_pad(elements_.mux, "src");
-        if (mux_src) {
-            gst_pad_add_probe(mux_src, GST_PAD_PROBE_TYPE_BUFFER,
-                [](GstPad* pad, GstPadProbeInfo* info, gpointer data) -> GstPadProbeReturn {
-                    CameraSource* self = static_cast<CameraSource*>(data);
-                    static guint64 count[2] = {0, 0};
-                    count[self->index_]++;
-                    if (count[self->index_] % 30 == 0) {
-                        LOG_INFO("[Camera %d] Mux 출력: %llu 프레임", 
-                                self->index_, count[self->index_]);
-                    }
-                    return GST_PAD_PROBE_OK;
-                }, this, nullptr);
-            gst_object_unref(mux_src);
-        }
-    }
-    
     // 6. 기존 OSD 프로브
     if (elements_.osd) {
         GstPad* osd_sink_pad = gst_element_get_static_pad(elements_.osd, "sink");
@@ -988,50 +945,6 @@ bool CameraSource::addProbes() {
             gst_pad_add_probe(osd_sink_pad, GST_PAD_PROBE_TYPE_BUFFER,
                 CameraSource::osdSinkPadProbe, this, nullptr);
             gst_object_unref(osd_sink_pad);
-        }
-    }
-
-    // 7. videoscale 출력 확인
-    if (elements_.videoscale) {
-        GstPad* scale_src = gst_element_get_static_pad(elements_.videoscale, "src");
-        if (scale_src) {
-            gst_pad_add_probe(scale_src, GST_PAD_PROBE_TYPE_BUFFER,
-                [](GstPad* pad, GstPadProbeInfo* info, gpointer data) -> GstPadProbeReturn {
-                    CameraSource* self = static_cast<CameraSource*>(data);
-                    static guint64 count[2] = {0, 0};
-                    count[self->index_]++;
-                    if (count[self->index_] % 30 == 0) {
-                        // Caps 정보도 출력
-                        GstCaps* caps = gst_pad_get_current_caps(pad);
-                        if (caps) {
-                            gchar* caps_str = gst_caps_to_string(caps);
-                            LOG_INFO("[Camera %d] Videoscale 출력: %llu 프레임, caps: %s", 
-                                    self->index_, count[self->index_], caps_str);
-                            g_free(caps_str);
-                            gst_caps_unref(caps);
-                        }
-                    }
-                    return GST_PAD_PROBE_OK;
-                }, this, nullptr);
-            gst_object_unref(scale_src);
-        }
-    }
-
-    if (elements_.converter2) {
-        GstPad* conv2_src = gst_element_get_static_pad(elements_.converter2, "src");
-        if (conv2_src) {
-            gst_pad_add_probe(conv2_src, GST_PAD_PROBE_TYPE_BUFFER,
-                [](GstPad* pad, GstPadProbeInfo* info, gpointer data) -> GstPadProbeReturn {
-                    CameraSource* self = static_cast<CameraSource*>(data);
-                    static guint64 count[2] = {0, 0};
-                    count[self->index_]++;
-                    if (count[self->index_] % 30 == 0) {
-                        LOG_INFO("[Camera %d] Converter2 출력: %llu 프레임", 
-                                self->index_, count[self->index_]);
-                    }
-                    return GST_PAD_PROBE_OK;
-                }, this, nullptr);
-            gst_object_unref(conv2_src);
         }
     }
 
@@ -1051,25 +964,6 @@ bool CameraSource::addProbes() {
                     return GST_PAD_PROBE_OK;
                 }, this, nullptr);
             gst_object_unref(infer_src);
-        }
-    }
-    
-    // 10. nvof 출력 확인
-    if (elements_.nvof) {
-        GstPad* nvof_src = gst_element_get_static_pad(elements_.nvof, "src");
-        if (nvof_src) {
-            gst_pad_add_probe(nvof_src, GST_PAD_PROBE_TYPE_BUFFER,
-                [](GstPad* pad, GstPadProbeInfo* info, gpointer data) -> GstPadProbeReturn {
-                    CameraSource* self = static_cast<CameraSource*>(data);
-                    static guint64 count[2] = {0, 0};
-                    count[self->index_]++;
-                    if (count[self->index_] % 30 == 0) {
-                        LOG_INFO("[Camera %d] NVOF 출력: %llu 프레임", 
-                                self->index_, count[self->index_]);
-                    }
-                    return GST_PAD_PROBE_OK;
-                }, this, nullptr);
-            gst_object_unref(nvof_src);
         }
     }
     

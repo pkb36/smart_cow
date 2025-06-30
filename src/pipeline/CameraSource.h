@@ -99,6 +99,10 @@ private:
         GstElement* payloader;
         GstElement* queue4;
         GstElement* sink;
+
+        GstElement* main_tee;
+        GstElement* udpsink;
+        GstElement* rtppay;
     } elements_;
 };
 
