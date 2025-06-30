@@ -265,18 +265,103 @@ bool Pipeline::setupOutputs(const Config& config) {
         GstElement* mainTee = nullptr;
         GstElement* subTee = nullptr;
         
-        // Tee 요소 찾기
+        // Tee 요소 찾기 - 인코더 체인 내부에서 찾기
         gchar teeName[64];
         g_snprintf(teeName, sizeof(teeName), "video_enc_tee1_%d", cam);
+        
+        // 먼저 파이프라인 레벨에서 찾기
         mainTee = gst_bin_get_by_name(GST_BIN(pipeline_), teeName);
         
+        if (!mainTee) {
+            // 인코더 bin 내부에서 찾기
+            gchar binName[64];
+            g_snprintf(binName, sizeof(binName), "encoder1_%d", cam);
+            GstElement* encBin = gst_bin_get_by_name(GST_BIN(pipeline_), binName);
+            if (encBin) {
+                mainTee = gst_bin_get_by_name(GST_BIN(encBin), teeName);
+                if (!mainTee) {
+                    // bin 내부의 모든 요소를 순회하며 tee 찾기
+                    GstIterator* it = gst_bin_iterate_elements(GST_BIN(encBin));
+                    GValue item = G_VALUE_INIT;
+                    gboolean done = FALSE;
+                    
+                    while (!done) {
+                        switch (gst_iterator_next(it, &item)) {
+                            case GST_ITERATOR_OK: {
+                                GstElement* element = GST_ELEMENT(g_value_get_object(&item));
+                                gchar* elemName = gst_element_get_name(element);
+                                if (g_str_has_prefix(elemName, "video_enc_tee1_")) {
+                                    mainTee = GST_ELEMENT(gst_object_ref(element));
+                                    done = TRUE;
+                                }
+                                g_free(elemName);
+                                g_value_reset(&item);
+                                break;
+                            }
+                            case GST_ITERATOR_DONE:
+                                done = TRUE;
+                                break;
+                            default:
+                                break;
+                        }
+                    }
+                    g_value_unset(&item);
+                    gst_iterator_free(it);
+                }
+                gst_object_unref(encBin);
+            }
+        }
+        
+        if (!mainTee) {
+            LOG_WARN("Main tee not found for camera %d", cam);
+            continue;
+        }
+        
+        // 서브 tee 찾기
         g_snprintf(teeName, sizeof(teeName), "video_enc_tee2_%d", cam);
         subTee = gst_bin_get_by_name(GST_BIN(pipeline_), teeName);
         
-        if (!mainTee) {
-            LOG_WARN("Main tee not found for camera %d (will be created in linkElements)", cam);
-            continue;
+        if (!subTee) {
+            // 인코더2 bin 내부에서 찾기
+            gchar binName[64];
+            g_snprintf(binName, sizeof(binName), "encoder2_%d", cam);
+            GstElement* encBin = gst_bin_get_by_name(GST_BIN(pipeline_), binName);
+            if (encBin) {
+                subTee = gst_bin_get_by_name(GST_BIN(encBin), teeName);
+                if (!subTee) {
+                    // bin 내부의 모든 요소를 순회하며 tee 찾기
+                    GstIterator* it = gst_bin_iterate_elements(GST_BIN(encBin));
+                    GValue item = G_VALUE_INIT;
+                    gboolean done = FALSE;
+                    
+                    while (!done) {
+                        switch (gst_iterator_next(it, &item)) {
+                            case GST_ITERATOR_OK: {
+                                GstElement* element = GST_ELEMENT(g_value_get_object(&item));
+                                gchar* elemName = gst_element_get_name(element);
+                                if (g_str_has_prefix(elemName, "video_enc_tee2_")) {
+                                    subTee = GST_ELEMENT(gst_object_ref(element));
+                                    done = TRUE;
+                                }
+                                g_free(elemName);
+                                g_value_reset(&item);
+                                break;
+                            }
+                            case GST_ITERATOR_DONE:
+                                done = TRUE;
+                                break;
+                            default:
+                                break;
+                        }
+                    }
+                    g_value_unset(&item);
+                    gst_iterator_free(it);
+                }
+                gst_object_unref(encBin);
+            }
         }
+        
+        LOG_INFO("Found tees for camera %d: main=%p, sub=%p", cam, mainTee, subTee);
         
         // 메인 스트림 출력 (Sender + Recorder + Event Recorder)
         for (int stream = 0; stream < maxStreamCount + 2; stream++) {
@@ -294,10 +379,12 @@ bool Pipeline::setupOutputs(const Config& config) {
                     outputs_.push_back(std::move(output));
                 }
             }
+            gst_object_unref(subTee);
         }
         
-        gst_object_unref(mainTee);
-        gst_object_unref(subTee);
+        if (mainTee) {
+            gst_object_unref(mainTee);
+        }
     }
     
     LOG_INFO("Set up %zu stream outputs", outputs_.size());
@@ -305,6 +392,20 @@ bool Pipeline::setupOutputs(const Config& config) {
 }
 
 bool Pipeline::linkElements() {
+    // pad link 결과를 문자열로 변환하는 헬퍼 함수
+    auto padLinkReturnToString = [](GstPadLinkReturn ret) -> const char* {
+        switch(ret) {
+            case GST_PAD_LINK_OK: return "OK";
+            case GST_PAD_LINK_WRONG_HIERARCHY: return "WRONG_HIERARCHY";
+            case GST_PAD_LINK_WAS_LINKED: return "WAS_LINKED";
+            case GST_PAD_LINK_WRONG_DIRECTION: return "WRONG_DIRECTION";
+            case GST_PAD_LINK_NOFORMAT: return "NOFORMAT";
+            case GST_PAD_LINK_NOSCHED: return "NOSCHED";
+            case GST_PAD_LINK_REFUSED: return "REFUSED";
+            default: return "UNKNOWN";
+        }
+    };
+    
     // 카메라별 인코더 생성 및 연결
     for (size_t i = 0; i < cameras_.size(); i++) {
         const CameraConfig& config = config_->getCameraConfig(i);
@@ -315,7 +416,7 @@ bool Pipeline::linkElements() {
             continue;
         }
         
-        // 메인 인코더 체인 생성
+        // 메인 인코더 체인 생성 (enc)
         GError* error = nullptr;
         GstElement* encBin1 = gst_parse_bin_from_description(
             config.encoder.c_str(), TRUE, &error);
@@ -336,39 +437,16 @@ bool Pipeline::linkElements() {
         // 카메라 출력(추론 체인의 출력)과 인코더 연결
         GstElement* cameraOutput = cameras_[i]->getOutputElement();
         
-        // cameraOutput이 bin인 경우, src ghost pad를 찾아서 연결
+        // Ghost pad를 통한 연결
         GstPad* srcPad = gst_element_get_static_pad(cameraOutput, "src");
         if (!srcPad) {
-            // ghost pad가 없으면 내부 요소의 src pad를 찾기
-            GstIterator* it = gst_bin_iterate_sources(GST_BIN(cameraOutput));
-            GValue item = G_VALUE_INIT;
-            gboolean done = FALSE;
-            
-            while (!done) {
-                switch (gst_iterator_next(it, &item)) {
-                    case GST_ITERATOR_OK: {
-                        GstElement* element = GST_ELEMENT(g_value_get_object(&item));
-                        srcPad = gst_element_get_static_pad(element, "src");
-                        if (srcPad) {
-                            done = TRUE;
-                        }
-                        g_value_reset(&item);
-                        break;
-                    }
-                    case GST_ITERATOR_DONE:
-                        done = TRUE;
-                        break;
-                    default:
-                        break;
-                }
-            }
-            g_value_unset(&item);
-            gst_iterator_free(it);
+            LOG_ERROR("Failed to get src pad from camera output %zu", i);
+            return false;
         }
         
         GstPad* sinkPad = gst_element_get_static_pad(encBin1, "sink");
         if (!sinkPad) {
-            // ghost pad가 없으면 내부 요소의 sink pad를 찾기
+            // Ghost pad가 없으면 첫 번째 요소의 sink pad 찾기
             GstIterator* it = gst_bin_iterate_sinks(GST_BIN(encBin1));
             GValue item = G_VALUE_INIT;
             gboolean done = FALSE;
@@ -395,38 +473,42 @@ bool Pipeline::linkElements() {
             gst_iterator_free(it);
         }
         
-        if (srcPad && sinkPad) {
-            if (gst_pad_link(srcPad, sinkPad) != GST_PAD_LINK_OK) {
-                LOG_ERROR("Failed to link camera %zu to encoder", i);
-                gst_object_unref(srcPad);
-                gst_object_unref(sinkPad);
-                return false;
-            }
-            gst_object_unref(srcPad);
-            gst_object_unref(sinkPad);
-        } else {
-            LOG_ERROR("Failed to find pads for linking camera %zu", i);
+        if (!srcPad || !sinkPad) {
+            LOG_ERROR("Failed to get pads for linking camera %zu to encoder", i);
             if (srcPad) gst_object_unref(srcPad);
             if (sinkPad) gst_object_unref(sinkPad);
             return false;
         }
         
-        // Tee 요소 생성 및 연결
-        g_snprintf(binName, sizeof(binName), "video_enc_tee1_%zu", i);
-        GstElement* tee1 = gst_element_factory_make("tee", binName);
-        gst_bin_add(GST_BIN(pipeline_), tee1);
-        
-        // 인코더 출력을 tee에 연결
-        if (!gst_element_link(encBin1, tee1)) {
-            LOG_ERROR("Failed to link encoder to tee for camera %zu", i);
+        GstPadLinkReturn linkRet = gst_pad_link(srcPad, sinkPad);
+        if (linkRet != GST_PAD_LINK_OK) {
+            LOG_ERROR("Failed to link camera %zu to encoder: %d", i, linkRet);
+            gst_object_unref(srcPad);
+            gst_object_unref(sinkPad);
             return false;
         }
         
-        // TODO: enc2 (서브 인코더) 처리
+        gst_object_unref(srcPad);
+        gst_object_unref(sinkPad);
+        
+        LOG_INFO("Encoder1 linked for camera %zu", i);
+        
+        // 서브 인코더 처리 (enc2)
         if (!config.encoder2.empty()) {
-            // 서브 인코더 체인 생성
+            // "video_src_tee0. !" 부분 제거하고 나머지만 파싱
+            std::string enc2Config = config.encoder2;
+            size_t teePos = enc2Config.find("video_src_tee");
+            if (teePos != std::string::npos) {
+                size_t exclamPos = enc2Config.find("!", teePos);
+                if (exclamPos != std::string::npos) {
+                    enc2Config = enc2Config.substr(exclamPos + 1);
+                    // 앞의 공백 제거
+                    enc2Config.erase(0, enc2Config.find_first_not_of(" "));
+                }
+            }
+            
             GstElement* encBin2 = gst_parse_bin_from_description(
-                config.encoder2.c_str(), TRUE, &error);
+                enc2Config.c_str(), TRUE, &error);
             
             if (error) {
                 LOG_ERROR("Failed to create encoder 2 for camera %zu: %s", i, error->message);
@@ -439,20 +521,212 @@ bool Pipeline::linkElements() {
                 // 파이프라인에 추가
                 gst_bin_add(GST_BIN(pipeline_), encBin2);
                 
-                // Tee 생성 및 연결
-                g_snprintf(binName, sizeof(binName), "video_enc_tee2_%zu", i);
-                GstElement* tee2 = gst_element_factory_make("tee", binName);
-                gst_bin_add(GST_BIN(pipeline_), tee2);
+                // video_src_tee 찾기
+                g_snprintf(binName, sizeof(binName), "video_src_tee%zu", i);
+                GstElement* srcTee = nullptr;
                 
-                if (gst_element_link(encBin2, tee2)) {
-                    LOG_INFO("Encoder2 linked for camera %zu", i);
+                // 카메라 소스 element에서 tee 찾기
+                GstElement* sourceElement = cameras_[i]->getSourceElement();
+                if (sourceElement) {
+                    if (GST_IS_BIN(sourceElement)) {
+                        srcTee = gst_bin_get_by_name(GST_BIN(sourceElement), binName);
+                    } else {
+                        // 소스가 bin이 아니면 파이프라인에서 찾기
+                        srcTee = gst_bin_get_by_name(GST_BIN(pipeline_), binName);
+                    }
+                }
+                
+                if (srcTee) {
+                    // Tee의 새 src pad 요청
+                    GstPadTemplate* padTemplate = gst_element_class_get_pad_template(
+                        GST_ELEMENT_GET_CLASS(srcTee), "src_%u");
+                    GstPad* teeSrcPad = gst_element_request_pad(srcTee, padTemplate, nullptr, nullptr);
+                    
+                    if (teeSrcPad) {
+                        // 소스 bin에 ghost pad 추가
+                        gchar ghostPadName[64];
+                        g_snprintf(ghostPadName, sizeof(ghostPadName), "src_enc2_%zu", i);
+                        
+                        GstElement* parentBin = GST_ELEMENT(gst_element_get_parent(srcTee));
+                        if (parentBin) {
+                            GstPad* ghostPad = gst_ghost_pad_new(ghostPadName, teeSrcPad);
+                            gst_element_add_pad(parentBin, ghostPad);
+                            
+                            // enc2의 sink pad 찾기
+                            GstPad* enc2SinkPad = gst_element_get_static_pad(encBin2, "sink");
+                            if (!enc2SinkPad) {
+                                // Ghost pad가 없으면 첫 번째 요소 찾기
+                                GstIterator* it = gst_bin_iterate_sinks(GST_BIN(encBin2));
+                                GValue item = G_VALUE_INIT;
+                                gboolean done = FALSE;
+                                
+                                while (!done) {
+                                    switch (gst_iterator_next(it, &item)) {
+                                        case GST_ITERATOR_OK: {
+                                            GstElement* element = GST_ELEMENT(g_value_get_object(&item));
+                                            enc2SinkPad = gst_element_get_static_pad(element, "sink");
+                                            if (enc2SinkPad) {
+                                                done = TRUE;
+                                            }
+                                            g_value_reset(&item);
+                                            break;
+                                        }
+                                        case GST_ITERATOR_DONE:
+                                            done = TRUE;
+                                            break;
+                                        default:
+                                            break;
+                                    }
+                                }
+                                g_value_unset(&item);
+                                gst_iterator_free(it);
+                            }
+                            
+                            if (ghostPad && enc2SinkPad) {
+                                GstPadLinkReturn ret = gst_pad_link(ghostPad, enc2SinkPad);
+                                if (ret == GST_PAD_LINK_OK) {
+                                    LOG_INFO("Encoder2 linked for camera %zu", i);
+                                } else {
+                                    LOG_ERROR("Failed to link ghost pad to encoder2 for camera %zu: %s", i, 
+                                             padLinkReturnToString(ret));
+                                }
+                                gst_object_unref(enc2SinkPad);
+                            }
+                            
+                            gst_object_unref(parentBin);
+                        }
+                        
+                        gst_element_release_request_pad(srcTee, teeSrcPad);
+                        gst_object_unref(teeSrcPad);
+                    }
+                    gst_object_unref(srcTee);
                 } else {
-                    LOG_ERROR("Failed to link encoder2 to tee2 for camera %zu", i);
+                    LOG_ERROR("Source tee not found for encoder2 of camera %zu", i);
                 }
             }
         }
         
-        // TODO: snapshot 처리
+        // 스냅샷 처리
+        if (!config.snapshot.empty()) {
+            // "video_src_tee0. !" 부분 제거하고 나머지만 파싱
+            std::string snapConfig = config.snapshot;
+            size_t teePos = snapConfig.find("video_src_tee");
+            if (teePos != std::string::npos) {
+                size_t exclamPos = snapConfig.find("!", teePos);
+                if (exclamPos != std::string::npos) {
+                    snapConfig = snapConfig.substr(exclamPos + 1);
+                    // 앞의 공백 제거
+                    snapConfig.erase(0, snapConfig.find_first_not_of(" "));
+                }
+            }
+            
+            GstElement* snapBin = gst_parse_bin_from_description(
+                snapConfig.c_str(), TRUE, &error);
+            
+            if (error) {
+                LOG_ERROR("Failed to create snapshot for camera %zu: %s", i, error->message);
+                g_error_free(error);
+                error = nullptr;
+            } else {
+                g_snprintf(binName, sizeof(binName), "snapshot_%zu", i);
+                gst_element_set_name(snapBin, binName);
+                
+                // 파이프라인에 추가
+                gst_bin_add(GST_BIN(pipeline_), snapBin);
+                
+                // multifilesink location 설정
+                GstElement* filesink = gst_bin_get_by_name(GST_BIN(snapBin), "multifilesink0");
+                if (filesink) {
+                    std::string location = config_->getSystemConfig().snapshotPath + 
+                                         "/snapshot_cam" + std::to_string(i) + "_%05d.jpg";
+                    g_object_set(filesink, "location", location.c_str(), nullptr);
+                    gst_object_unref(filesink);
+                }
+                
+                // video_src_tee 찾기
+                g_snprintf(binName, sizeof(binName), "video_src_tee%zu", i);
+                GstElement* srcTee = nullptr;
+                
+                // 카메라 소스 element에서 tee 찾기
+                GstElement* sourceElement = cameras_[i]->getSourceElement();
+                if (sourceElement) {
+                    if (GST_IS_BIN(sourceElement)) {
+                        srcTee = gst_bin_get_by_name(GST_BIN(sourceElement), binName);
+                    } else {
+                        // 소스가 bin이 아니면 파이프라인에서 찾기
+                        srcTee = gst_bin_get_by_name(GST_BIN(pipeline_), binName);
+                    }
+                }
+                
+                if (srcTee) {
+                    // Tee의 새 src pad 요청
+                    GstPadTemplate* padTemplate = gst_element_class_get_pad_template(
+                        GST_ELEMENT_GET_CLASS(srcTee), "src_%u");
+                    GstPad* teeSrcPad = gst_element_request_pad(srcTee, padTemplate, nullptr, nullptr);
+                    
+                    if (teeSrcPad) {
+                        // 소스 bin에 ghost pad 추가
+                        gchar ghostPadName[64];
+                        g_snprintf(ghostPadName, sizeof(ghostPadName), "src_snap_%zu", i);
+                        
+                        GstElement* parentBin = GST_ELEMENT(gst_element_get_parent(srcTee));
+                        if (parentBin) {
+                            GstPad* ghostPad = gst_ghost_pad_new(ghostPadName, teeSrcPad);
+                            gst_element_add_pad(parentBin, ghostPad);
+                            
+                            // snapshot의 sink pad 찾기
+                            GstPad* snapSinkPad = gst_element_get_static_pad(snapBin, "sink");
+                            if (!snapSinkPad) {
+                                // Ghost pad가 없으면 첫 번째 요소 찾기
+                                GstIterator* it = gst_bin_iterate_sinks(GST_BIN(snapBin));
+                                GValue item = G_VALUE_INIT;
+                                gboolean done = FALSE;
+                                
+                                while (!done) {
+                                    switch (gst_iterator_next(it, &item)) {
+                                        case GST_ITERATOR_OK: {
+                                            GstElement* element = GST_ELEMENT(g_value_get_object(&item));
+                                            snapSinkPad = gst_element_get_static_pad(element, "sink");
+                                            if (snapSinkPad) {
+                                                done = TRUE;
+                                            }
+                                            g_value_reset(&item);
+                                            break;
+                                        }
+                                        case GST_ITERATOR_DONE:
+                                            done = TRUE;
+                                            break;
+                                        default:
+                                            break;
+                                    }
+                                }
+                                g_value_unset(&item);
+                                gst_iterator_free(it);
+                            }
+                            
+                            if (ghostPad && snapSinkPad) {
+                                GstPadLinkReturn ret = gst_pad_link(ghostPad, snapSinkPad);
+                                if (ret == GST_PAD_LINK_OK) {
+                                    LOG_INFO("Snapshot linked for camera %zu", i);
+                                } else {
+                                    LOG_ERROR("Failed to link ghost pad to snapshot for camera %zu: %s", i,
+                                             padLinkReturnToString(ret));
+                                }
+                                gst_object_unref(snapSinkPad);
+                            }
+                            
+                            gst_object_unref(parentBin);
+                        }
+                        
+                        gst_element_release_request_pad(srcTee, teeSrcPad);
+                        gst_object_unref(teeSrcPad);
+                    }
+                    gst_object_unref(srcTee);
+                } else {
+                    LOG_ERROR("Source tee not found for snapshot of camera %zu", i);
+                }
+            }
+        }
     }
     
     LOG_INFO("All elements linked successfully");

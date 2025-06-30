@@ -163,11 +163,6 @@ src/pipeline/CameraSource.o: src/pipeline/CameraSource.cpp \
  /usr/include/gstreamer-1.0/gst/gstutils.h \
  /usr/include/gstreamer-1.0/gst/gstparse.h \
  /usr/include/gstreamer-1.0/gst/gstcompat.h \
- src/pipeline/../common/Types.h \
- src/pipeline/../detection/DetectionBuffer.h \
- src/pipeline/../detection/../common/Types.h \
- src/pipeline/../detection/Detector.h src/pipeline/../utils/Logger.h \
- src/pipeline/../utils/DeviceSetting.h \
  /opt/nvidia/deepstream/deepstream/sources/includes/gstnvdsmeta.h \
  /usr/include/gstreamer-1.0/gst/video/video.h \
  /usr/include/gstreamer-1.0/gst/video/video-prelude.h \
@@ -215,4 +210,9 @@ src/pipeline/CameraSource.o: src/pipeline/CameraSource.cpp \
  /opt/nvidia/deepstream/deepstream/sources/includes/nvds_audio_meta.h \
  /opt/nvidia/deepstream/deepstream/sources/includes/nvdsmeta.h \
  /opt/nvidia/deepstream/deepstream/sources/includes/nvbufaudio.h \
- /opt/nvidia/deepstream/deepstream/sources/includes/nvds_latency_meta.h
+ /opt/nvidia/deepstream/deepstream/sources/includes/nvds_latency_meta.h \
+ src/pipeline/../common/Types.h \
+ src/pipeline/../detection/DetectionBuffer.h \
+ src/pipeline/../detection/../common/Types.h \
+ src/pipeline/../detection/Detector.h src/pipeline/../utils/Logger.h \
+ src/pipeline/../utils/DeviceSetting.h

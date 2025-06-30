@@ -1,11 +1,5 @@
 src/signaling/SignalingClient.o: src/signaling/SignalingClient.cpp \
- src/signaling/SignalingClient.h src/signaling/../utils/Logger.h \
- /usr/include/libsoup-2.4/libsoup/soup.h \
- /usr/include/libsoup-2.4/libsoup/soup-address.h \
- /usr/include/libsoup-2.4/libsoup/soup-types.h \
- /usr/include/glib-2.0/gio/gio.h /usr/include/glib-2.0/gio/giotypes.h \
- /usr/include/glib-2.0/gio/gioenums.h /usr/include/glib-2.0/glib-object.h \
- /usr/include/glib-2.0/gobject/gbinding.h /usr/include/glib-2.0/glib.h \
+ src/signaling/SignalingClient.h /usr/include/glib-2.0/glib.h \
  /usr/include/glib-2.0/glib/galloca.h /usr/include/glib-2.0/glib/gtypes.h \
  /usr/lib/aarch64-linux-gnu/glib-2.0/include/glibconfig.h \
  /usr/include/glib-2.0/glib/gmacros.h \
@@ -73,6 +67,9 @@ src/signaling/SignalingClient.o: src/signaling/SignalingClient.cpp \
  /usr/include/glib-2.0/glib/deprecated/grel.h \
  /usr/include/glib-2.0/glib/deprecated/gthread.h \
  /usr/include/glib-2.0/glib/glib-autocleanups.h \
+ /usr/include/glib-2.0/gio/gio.h /usr/include/glib-2.0/gio/giotypes.h \
+ /usr/include/glib-2.0/gio/gioenums.h /usr/include/glib-2.0/glib-object.h \
+ /usr/include/glib-2.0/gobject/gbinding.h \
  /usr/include/glib-2.0/gobject/gobject.h \
  /usr/include/glib-2.0/gobject/gtype.h \
  /usr/include/glib-2.0/gobject/gvalue.h \
@@ -236,6 +233,9 @@ src/signaling/SignalingClient.o: src/signaling/SignalingClient.cpp \
  /usr/include/glib-2.0/gio/gzlibcompressor.h \
  /usr/include/glib-2.0/gio/gzlibdecompressor.h \
  /usr/include/glib-2.0/gio/gio-autocleanups.h \
+ src/signaling/../utils/Logger.h /usr/include/libsoup-2.4/libsoup/soup.h \
+ /usr/include/libsoup-2.4/libsoup/soup-address.h \
+ /usr/include/libsoup-2.4/libsoup/soup-types.h \
  /usr/include/libsoup-2.4/libsoup/soup-version.h \
  /usr/include/libsoup-2.4/libsoup/soup-status.h \
  /usr/include/libsoup-2.4/libsoup/soup-auth.h \

@@ -197,6 +197,12 @@ int main(int argc, char* argv[]) {
         {"pipe", 'p', 0, G_OPTION_ARG_STRING, &pipePath, "Command pipe path", "PATH"},
         {nullptr}
     };
+
+    if (getenv("DISPLAY"))
+    {
+        printf("DISPLAY 환경변수 제거 중...\n");
+        unsetenv("DISPLAY");
+    }
     
     GError* error = nullptr;
     GOptionContext* context = g_option_context_new("- WebRTC camera streaming system");

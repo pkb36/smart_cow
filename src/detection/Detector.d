@@ -163,7 +163,13 @@ src/detection/Detector.o: src/detection/Detector.cpp \
  /usr/include/gstreamer-1.0/gst/gstutils.h \
  /usr/include/gstreamer-1.0/gst/gstparse.h \
  /usr/include/gstreamer-1.0/gst/gstcompat.h \
+ /opt/nvidia/deepstream/deepstream/sources/includes/nvdsmeta.h \
+ /usr/include/glib-2.0/gmodule.h \
+ /opt/nvidia/deepstream/deepstream/sources/includes/nvll_osd_struct.h \
+ /opt/nvidia/deepstream/deepstream/sources/includes/nvds_roi_meta.h \
+ /opt/nvidia/deepstream/deepstream/sources/includes/nvdsmeta.h \
  src/detection/../common/Types.h src/detection/../utils/Logger.h \
+ src/detection/../utils/DeviceSetting.h \
  /opt/nvidia/deepstream/deepstream/sources/includes/gstnvdsmeta.h \
  /usr/include/gstreamer-1.0/gst/video/video.h \
  /usr/include/gstreamer-1.0/gst/video/video-prelude.h \
@@ -204,11 +210,6 @@ src/detection/Detector.o: src/detection/Detector.cpp \
  /usr/include/gstreamer-1.0/gst/video/videooverlay.h \
  /usr/include/gstreamer-1.0/gst/video/gstvideoaffinetransformationmeta.h \
  /usr/include/gstreamer-1.0/gst/video/video-anc.h \
- /opt/nvidia/deepstream/deepstream/sources/includes/nvdsmeta.h \
- /usr/include/glib-2.0/gmodule.h \
- /opt/nvidia/deepstream/deepstream/sources/includes/nvll_osd_struct.h \
- /opt/nvidia/deepstream/deepstream/sources/includes/nvds_roi_meta.h \
  /opt/nvidia/deepstream/deepstream/sources/includes/nvds_audio_meta.h \
- /opt/nvidia/deepstream/deepstream/sources/includes/nvdsmeta.h \
  /opt/nvidia/deepstream/deepstream/sources/includes/nvbufaudio.h \
  /opt/nvidia/deepstream/deepstream/sources/includes/nvds_latency_meta.h

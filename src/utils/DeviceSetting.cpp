@@ -117,7 +117,15 @@ bool DeviceSetting::save() {
     if (currentFile_.empty()) {
         // 기본 파일명 사용
         currentFile_ = "device_setting.json";
+        LOG_INFO("Using default filename: %s", currentFile_.c_str());
     }
+    
+    // 파일명이 유효한지 확인
+    if (currentFile_.find_first_of("\x00\xff", 0, 2) != std::string::npos) {
+        LOG_ERROR("Invalid filename detected, using default");
+        currentFile_ = "device_setting.json";
+    }
+    
     return save(currentFile_);
 }
 
