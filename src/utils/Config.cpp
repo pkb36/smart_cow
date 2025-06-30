@@ -45,7 +45,9 @@ public:
                     cam.type = (i == 0) ? CameraType::RGB : CameraType::THERMAL;
                     cam.source = video.value("src", "");
                     cam.encoder = video.value("enc", "");
-                    
+                    cam.encoder2 = video.value("enc2", "");  // 서브 인코더
+                    cam.snapshot = video.value("snapshot", "");  // 스냅샷
+
                     // 추론 설정 파일 추출
                     std::string infer = video.value("infer", "");
                     size_t configPos = infer.find("config-file-path=");

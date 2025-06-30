@@ -6,6 +6,7 @@
 #include <gst/gst.h>
 #include <nvdsmeta.h>
 #include <cmath>
+#include <fstream>
 
 CameraSource::CameraSource(CameraType type, int index)
     : type_(type)
@@ -95,43 +96,53 @@ DetectionBuffer* CameraSource::getDetectionBuffer() const {
 bool CameraSource::createElements(const CameraConfig& config) {
     gchar elementName[64];
     
-    // 소스 파싱 및 생성
+    // 소스 파싱 및 생성 (전체 소스 체인 포함)
     if (!parseAndCreateSource(config.source)) {
         return false;
     }
     
-    // Clock Overlay
-    g_snprintf(elementName, sizeof(elementName), "clock_overlay_%d", index_);
-    clockOverlay_ = gst_element_factory_make("clockoverlay", elementName);
-    if (!clockOverlay_) {
-        LOG_ERROR("Failed to create clockoverlay");
-        return false;
-    }
-    g_object_set(clockOverlay_,
-                 "time-format", "%D %H:%M:%S",
-                 "font-desc", "Arial, 18",
-                 nullptr);
-    
-    // Tee (분기점)
+    // Tee는 이미 소스 체인에 포함되어 있음
     g_snprintf(elementName, sizeof(elementName), "video_src_tee%d", index_);
-    tee_ = gst_element_factory_make("tee", elementName);
+    tee_ = gst_bin_get_by_name(GST_BIN(source_), elementName);
     if (!tee_) {
-        LOG_ERROR("Failed to create tee");
+        LOG_ERROR("Failed to find tee element in source chain");
         return false;
     }
     
-    // 추론 파이프라인을 위한 요소들
+    // 추론 파이프라인 파싱
+    // 추론 파이프라인 파싱 - 먼저 외부 참조를 제거
+    std::string inferConfig = config.inferConfig;
+    
+    // "video_src_teeX. !" 부분 제거
+    size_t teePos = inferConfig.find("video_src_tee");
+    if (teePos != std::string::npos) {
+        size_t exclamPos = inferConfig.find("!", teePos);
+        if (exclamPos != std::string::npos) {
+            inferConfig = inferConfig.substr(exclamPos + 1);
+        }
+    }
+    
+    // "RGB.sink_0" 또는 "thermal.sink_0" 부분 제거
+    const char* muxName = (type_ == CameraType::RGB) ? "RGB" : "thermal";
+    std::string sinkRef = std::string(muxName) + ".sink_0";
+    size_t sinkPos = inferConfig.find(sinkRef);
+    if (sinkPos != std::string::npos) {
+        inferConfig.erase(sinkPos, sinkRef.length());
+    }
+    
+    // Queue 생성
     g_snprintf(elementName, sizeof(elementName), "infer_queue_%d", index_);
     queue_ = gst_element_factory_make("queue", elementName);
     
+    // Videoscale 생성
     g_snprintf(elementName, sizeof(elementName), "infer_scale_%d", index_);
     scale_ = gst_element_factory_make("videoscale", elementName);
     
-    // 컨버터 (추론용)
-    GstElement* inferConverter = gst_element_factory_make("nvvideoconvert", nullptr);
+    // nvvideoconvert 생성
+    g_snprintf(elementName, sizeof(elementName), "infer_conv_%d", index_);
+    GstElement* inferConv = gst_element_factory_make("nvvideoconvert", elementName);
     
-    // StreamMux
-    const char* muxName = (type_ == CameraType::RGB) ? "RGB" : "thermal";
+    // StreamMux 생성
     mux_ = gst_element_factory_make("nvstreammux", muxName);
     if (!mux_) {
         LOG_ERROR("Failed to create nvstreammux");
@@ -149,39 +160,43 @@ bool CameraSource::createElements(const CameraConfig& config) {
                  "live-source", 1,
                  nullptr);
     
-    // 추론 엔진 (nvinfer)
+    // 추론 엔진 (nvinfer) 생성
     g_snprintf(elementName, sizeof(elementName), "nvinfer_%d", index_ + 1);
     infer_ = gst_element_factory_make("nvinfer", elementName);
     if (!infer_) {
         LOG_ERROR("Failed to create nvinfer");
         return false;
     }
-    g_object_set(infer_,
-                 "config-file-path", config.inferConfig.c_str(),
-                 "unique-id", index_ + 1,
-                 nullptr);
     
-    // 트래커는 RGB 카메라에만
-    if (type_ == CameraType::RGB) {
-        tracker_ = gst_element_factory_make("nvtracker", "tracker_1");
-        if (tracker_) {
-            g_object_set(tracker_,
-                         "ll-lib-file", "/opt/nvidia/deepstream/deepstream/lib/libnvds_nvmultiobjecttracker.so",
-                         "ll-config-file", "config_tracker_NvDCF_perf.yml",
-                         "tracker-width", 640,
-                         "tracker-height", 384,
-                         nullptr);
+    // 추론 설정 파일 경로 추출
+    std::string inferConfigPath;
+    size_t configPos = config.inferConfig.find("config-file-path=");
+    if (configPos != std::string::npos) {
+        size_t start = configPos + 17;  // "config-file-path=" 길이
+        size_t end = config.inferConfig.find(" ", start);
+        if (end == std::string::npos) {
+            inferConfigPath = config.inferConfig.substr(start);
+        } else {
+            inferConfigPath = config.inferConfig.substr(start, end - start);
         }
     }
     
-    // Optical Flow (nvof)
-    GstElement* opticalFlow = gst_element_factory_make("nvof", nullptr);
+    g_object_set(infer_,
+                 "config-file-path", inferConfigPath.c_str(),
+                 "unique-id", index_ + 1,
+                 nullptr);
     
-    // 후처리
+    // nvof 생성
+    GstElement* nvof = gst_element_factory_make("nvof", nullptr);
+    
+    // nvvideoconvert 생성
+    GstElement* postConv = gst_element_factory_make("nvvideoconvert", nullptr);
+    
+    // dspostproc 생성
     g_snprintf(elementName, sizeof(elementName), "dspostproc_%d", index_ + 1);
     postproc_ = gst_element_factory_make("dspostproc", elementName);
     
-    // OSD
+    // nvdsosd 생성
     g_snprintf(elementName, sizeof(elementName), "nvosd_%d", index_ + 1);
     osd_ = gst_element_factory_make("nvdsosd", elementName);
     if (!osd_) {
@@ -189,21 +204,87 @@ bool CameraSource::createElements(const CameraConfig& config) {
         return false;
     }
     
-    // 출력 컨버터
-    outputConverter_ = gst_element_factory_make("nvvideoconvert", nullptr);
+    // 최종 converter 생성
+    g_snprintf(elementName, sizeof(elementName), "output_conv_%d", index_);
+    GstElement* outputConv = gst_element_factory_make("nvvideoconvert", elementName);
     
-    // 모든 요소가 생성되었는지 확인
-    if (!queue_ || !scale_ || !inferConverter || !opticalFlow || 
-        !postproc_ || !outputConverter_) {
-        LOG_ERROR("Failed to create all elements");
+    // 모든 요소 확인
+    if (!queue_ || !scale_ || !inferConv || !nvof || !postConv || 
+        !postproc_ || !outputConv) {
+        LOG_ERROR("Failed to create all inference elements");
         return false;
+    }
+    
+    // 추론 체인을 bin으로 묶기
+    GstElement* inferBin = gst_bin_new(nullptr);
+    gst_bin_add_many(GST_BIN(inferBin),
+                     queue_, scale_, inferConv, mux_, infer_, nvof,
+                     postConv, postproc_, osd_, outputConv, nullptr);
+    
+    // 요소들 연결
+    if (!gst_element_link(queue_, scale_)) {
+        LOG_ERROR("Failed to link queue to scale");
+        return false;
+    }
+    
+    // Scale caps 설정
+    GstCaps* scaleCaps = nullptr;
+    if (type_ == CameraType::RGB) {
+        scaleCaps = gst_caps_from_string("video/x-raw,width=1280,height=720");
+    } else {
+        scaleCaps = gst_caps_from_string("video/x-raw,width=640,height=480");
+    }
+    
+    if (!gst_element_link_filtered(scale_, inferConv, scaleCaps)) {
+        LOG_ERROR("Failed to link scale to converter");
+        gst_caps_unref(scaleCaps);
+        return false;
+    }
+    gst_caps_unref(scaleCaps);
+    
+    // Converter를 mux sink pad에 연결
+    GstPad* convSrcPad = gst_element_get_static_pad(inferConv, "src");
+    GstPad* muxSinkPad = gst_element_get_request_pad(mux_, "sink_0");
+    
+    if (gst_pad_link(convSrcPad, muxSinkPad) != GST_PAD_LINK_OK) {
+        LOG_ERROR("Failed to link converter to mux");
+        gst_object_unref(convSrcPad);
+        gst_object_unref(muxSinkPad);
+        return false;
+    }
+    gst_object_unref(convSrcPad);
+    gst_object_unref(muxSinkPad);
+    
+    // 나머지 체인 연결
+    if (!gst_element_link_many(mux_, infer_, nvof, postConv, 
+                               postproc_, osd_, outputConv, nullptr)) {
+        LOG_ERROR("Failed to link inference chain");
+        return false;
+    }
+    
+    // Ghost pad 추가
+    GstPad* sinkPad = gst_element_get_static_pad(queue_, "sink");
+    gst_element_add_pad(inferBin, gst_ghost_pad_new("sink", sinkPad));
+    gst_object_unref(sinkPad);
+    
+    GstPad* srcPad = gst_element_get_static_pad(outputConv, "src");
+    gst_element_add_pad(inferBin, gst_ghost_pad_new("src", srcPad));
+    gst_object_unref(srcPad);
+    
+    // inferBin을 outputConverter_로 사용
+    outputConverter_ = inferBin;
+    
+    // 트래커는 RGB 카메라에만 (추론 config에 nvtracker가 있는지 확인)
+    if (type_ == CameraType::RGB && config.inferConfig.find("nvtracker") == std::string::npos) {
+        // nvtracker가 없으면 추가하지 않음 (config에 없으면 필요없다고 가정)
+        LOG_INFO("No nvtracker in config for RGB camera");
     }
     
     return true;
 }
 
 bool CameraSource::parseAndCreateSource(const std::string& sourceStr) {
-    // 소스 문자열 파싱 (예: "v4l2src device=/dev/video0 ! ...")
+    // 전체 소스 체인을 파싱
     GError* error = nullptr;
     GstElement* bin = gst_parse_bin_from_description(sourceStr.c_str(), TRUE, &error);
     
@@ -218,114 +299,20 @@ bool CameraSource::parseAndCreateSource(const std::string& sourceStr) {
 }
 
 bool CameraSource::addElementsToPipeline(GstElement* pipeline) {
-    // 모든 요소를 파이프라인에 추가
-    gst_bin_add_many(GST_BIN(pipeline),
-                     source_, clockOverlay_, tee_,
-                     queue_, scale_, mux_, infer_,
-                     postproc_, osd_, outputConverter_,
-                     nullptr);
-    
-    // 트래커가 있으면 추가
-    if (tracker_) {
-        gst_bin_add(GST_BIN(pipeline), tracker_);
-    }
+    // 소스와 추론 체인 추가
+    gst_bin_add_many(GST_BIN(pipeline), source_, outputConverter_, nullptr);
     
     return true;
 }
 
 bool CameraSource::linkInternalElements() {
-    // 소스 -> 오버레이 -> Tee
-    if (!gst_element_link_many(source_, clockOverlay_, tee_, nullptr)) {
-        LOG_ERROR("Failed to link source chain");
-        return false;
-    }
+    // 소스 체인과 추론 체인은 이미 내부적으로 연결되어 있음
+    // Tee와 추론 체인만 연결하면 됨
     
-    // Tee -> Queue -> Scale
-    GstPad* teeSrcPad = gst_element_get_request_pad(tee_, "src_%u");
-    GstPad* queueSinkPad = gst_element_get_static_pad(queue_, "sink");
+    // Tee의 src pad와 추론 체인의 sink pad를 연결
+    // 이미 config에서 "video_src_tee0. ! queue ! ..." 형태로 연결되어 있음
     
-    if (gst_pad_link(teeSrcPad, queueSinkPad) != GST_PAD_LINK_OK) {
-        LOG_ERROR("Failed to link tee to queue");
-        return false;
-    }
-    
-    gst_object_unref(teeSrcPad);
-    gst_object_unref(queueSinkPad);
-    
-    // Scale 설정 및 연결
-    GstCaps* scaleCaps = nullptr;
-    if (type_ == CameraType::RGB) {
-        scaleCaps = gst_caps_from_string("video/x-raw,width=1280,height=720");
-    } else {
-        scaleCaps = gst_caps_from_string("video/x-raw,width=640,height=480");
-    }
-    
-    if (!gst_element_link_filtered(queue_, scale_, scaleCaps)) {
-        LOG_ERROR("Failed to link queue to scale");
-        gst_caps_unref(scaleCaps);
-        return false;
-    }
-    gst_caps_unref(scaleCaps);
-    
-    // Scale -> nvvideoconvert -> Mux sink pad
-    GstElement* tempConverter = gst_bin_get_by_name(GST_BIN(gst_element_get_parent(scale_)), 
-                                                   "nvvideoconvert0");
-    if (tempConverter && !gst_element_link(scale_, tempConverter)) {
-        LOG_ERROR("Failed to link scale to converter");
-        return false;
-    }
-    
-    // Mux sink 패드 연결
-    GstPad* muxSinkPad = gst_element_get_request_pad(mux_, 
-                                                     type_ == CameraType::RGB ? "sink_0" : "sink_0");
-    if (!muxSinkPad) {
-        LOG_ERROR("Failed to get mux sink pad");
-        return false;
-    }
-    
-    // 추론 체인 연결
-    GstElement* prevElement = mux_;
-    
-    // Mux -> Infer
-    if (!gst_element_link(prevElement, infer_)) {
-        LOG_ERROR("Failed to link to infer");
-        return false;
-    }
-    prevElement = infer_;
-    
-    // Infer -> Tracker (RGB만)
-    if (tracker_) {
-        if (!gst_element_link(prevElement, tracker_)) {
-            LOG_ERROR("Failed to link to tracker");
-            return false;
-        }
-        prevElement = tracker_;
-    }
-    
-    // -> PostProc -> OSD -> Converter
-    if (!gst_element_link_many(prevElement, postproc_, osd_, outputConverter_, nullptr)) {
-        LOG_ERROR("Failed to link inference chain");
-        return false;
-    }
-    
-    // 출력 해상도 설정
-    GstCaps* outputCaps = nullptr;
-    if (type_ == CameraType::RGB) {
-        outputCaps = gst_caps_from_string("video/x-raw,width=1920,height=1080");
-    } else {
-        outputCaps = gst_caps_from_string("video/x-raw,width=384,height=288");
-    }
-    
-    GstElement* nextElement = gst_bin_get_by_name(GST_BIN(gst_element_get_parent(outputConverter_)), 
-                                                  type_ == CameraType::RGB ? "video_enc_tee1_0" : "video_enc_tee1_1");
-    if (nextElement) {
-        gst_element_link_filtered(outputConverter_, nextElement, outputCaps);
-        gst_object_unref(nextElement);
-    }
-    
-    if (outputCaps) {
-        gst_caps_unref(outputCaps);
-    }
+    LOG_DEBUG("Internal elements already linked through parse");
     
     return true;
 }
@@ -401,6 +388,44 @@ GstPadProbeReturn CameraSource::osdSinkPadProbe(GstPad* pad, GstPadProbeInfo* in
             obj.bbox.y = static_cast<int>(objMeta->rect_params.top);
             obj.bbox.width = static_cast<int>(objMeta->rect_params.width);
             obj.bbox.height = static_cast<int>(objMeta->rect_params.height);
+            
+            // 색상 결정
+            obj.color = self->determineObjectColor(objMeta);
+            obj.hasBbox = (obj.color != BboxColor::NONE);
+            
+            // OSD 메타데이터 업데이트
+            if (obj.hasBbox) {
+                switch (obj.color) {
+                    case BboxColor::GREEN:
+                        objMeta->rect_params.border_color.red = 0.0;
+                        objMeta->rect_params.border_color.green = 1.0;
+                        objMeta->rect_params.border_color.blue = 0.0;
+                        break;
+                    case BboxColor::YELLOW:
+                        objMeta->rect_params.border_color.red = 1.0;
+                        objMeta->rect_params.border_color.green = 1.0;
+                        objMeta->rect_params.border_color.blue = 0.0;
+                        break;
+                    case BboxColor::RED:
+                        objMeta->rect_params.border_color.red = 1.0;
+                        objMeta->rect_params.border_color.green = 0.0;
+                        objMeta->rect_params.border_color.blue = 0.0;
+                        break;
+                    case BboxColor::BLUE:
+                        objMeta->rect_params.border_color.red = 0.0;
+                        objMeta->rect_params.border_color.green = 0.0;
+                        objMeta->rect_params.border_color.blue = 1.0;
+                        break;
+                    default:
+                        objMeta->rect_params.has_bg_color = 0;
+                        break;
+                }
+                
+                if (obj.color != BboxColor::NONE) {
+                    objMeta->rect_params.border_color.alpha = 1.0;
+                    objMeta->rect_params.border_width = 3;
+                }
+            }
             
             detection.objects.push_back(obj);
         }

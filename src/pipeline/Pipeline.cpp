@@ -50,13 +50,13 @@ bool Pipeline::init(const Config& config) {
         return false;
     }
     
-    // 스트림 출력 설정
-    if (!setupOutputs(config)) {
-        return false;
-    }
-    
     // 요소 연결
     if (!linkElements()) {
+        return false;
+    }
+
+    // 스트림 출력 설정
+    if (!setupOutputs(config)) {
         return false;
     }
     
@@ -273,8 +273,8 @@ bool Pipeline::setupOutputs(const Config& config) {
         g_snprintf(teeName, sizeof(teeName), "video_enc_tee2_%d", cam);
         subTee = gst_bin_get_by_name(GST_BIN(pipeline_), teeName);
         
-        if (!mainTee || !subTee) {
-            LOG_ERROR("Failed to find tee elements for camera %d", cam);
+        if (!mainTee) {
+            LOG_WARN("Main tee not found for camera %d (will be created in linkElements)", cam);
             continue;
         }
         
@@ -287,10 +287,12 @@ bool Pipeline::setupOutputs(const Config& config) {
         }
         
         // 서브 스트림 출력 (Sender + Recorder + Event Recorder)
-        for (int stream = 0; stream < maxStreamCount + 2; stream++) {
-            auto output = std::make_unique<StreamOutput>(cam, stream, StreamOutput::SUB_STREAM);
-            if (output->init(pipeline_, subTee, basePort)) {
-                outputs_.push_back(std::move(output));
+        if (subTee) {
+            for (int stream = 0; stream < maxStreamCount + 2; stream++) {
+                auto output = std::make_unique<StreamOutput>(cam, stream, StreamOutput::SUB_STREAM);
+                if (output->init(pipeline_, subTee, basePort)) {
+                    outputs_.push_back(std::move(output));
+                }
             }
         }
         
@@ -307,6 +309,12 @@ bool Pipeline::linkElements() {
     for (size_t i = 0; i < cameras_.size(); i++) {
         const CameraConfig& config = config_->getCameraConfig(i);
         
+        // 인코더 체인이 config에 있는지 확인
+        if (config.encoder.empty()) {
+            LOG_WARN("No encoder config for camera %zu", i);
+            continue;
+        }
+        
         // 메인 인코더 체인 생성
         GError* error = nullptr;
         GstElement* encBin1 = gst_parse_bin_from_description(
@@ -322,16 +330,84 @@ bool Pipeline::linkElements() {
         g_snprintf(binName, sizeof(binName), "encoder1_%zu", i);
         gst_element_set_name(encBin1, binName);
         
-        // 서브 인코더 체인 생성 (있는 경우)
-        // TODO: config에 encoder2 추가 필요
-        
         // 파이프라인에 추가
         gst_bin_add(GST_BIN(pipeline_), encBin1);
         
-        // 카메라 출력과 인코더 연결
+        // 카메라 출력(추론 체인의 출력)과 인코더 연결
         GstElement* cameraOutput = cameras_[i]->getOutputElement();
-        if (!gst_element_link(cameraOutput, encBin1)) {
-            LOG_ERROR("Failed to link camera %zu to encoder", i);
+        
+        // cameraOutput이 bin인 경우, src ghost pad를 찾아서 연결
+        GstPad* srcPad = gst_element_get_static_pad(cameraOutput, "src");
+        if (!srcPad) {
+            // ghost pad가 없으면 내부 요소의 src pad를 찾기
+            GstIterator* it = gst_bin_iterate_sources(GST_BIN(cameraOutput));
+            GValue item = G_VALUE_INIT;
+            gboolean done = FALSE;
+            
+            while (!done) {
+                switch (gst_iterator_next(it, &item)) {
+                    case GST_ITERATOR_OK: {
+                        GstElement* element = GST_ELEMENT(g_value_get_object(&item));
+                        srcPad = gst_element_get_static_pad(element, "src");
+                        if (srcPad) {
+                            done = TRUE;
+                        }
+                        g_value_reset(&item);
+                        break;
+                    }
+                    case GST_ITERATOR_DONE:
+                        done = TRUE;
+                        break;
+                    default:
+                        break;
+                }
+            }
+            g_value_unset(&item);
+            gst_iterator_free(it);
+        }
+        
+        GstPad* sinkPad = gst_element_get_static_pad(encBin1, "sink");
+        if (!sinkPad) {
+            // ghost pad가 없으면 내부 요소의 sink pad를 찾기
+            GstIterator* it = gst_bin_iterate_sinks(GST_BIN(encBin1));
+            GValue item = G_VALUE_INIT;
+            gboolean done = FALSE;
+            
+            while (!done) {
+                switch (gst_iterator_next(it, &item)) {
+                    case GST_ITERATOR_OK: {
+                        GstElement* element = GST_ELEMENT(g_value_get_object(&item));
+                        sinkPad = gst_element_get_static_pad(element, "sink");
+                        if (sinkPad) {
+                            done = TRUE;
+                        }
+                        g_value_reset(&item);
+                        break;
+                    }
+                    case GST_ITERATOR_DONE:
+                        done = TRUE;
+                        break;
+                    default:
+                        break;
+                }
+            }
+            g_value_unset(&item);
+            gst_iterator_free(it);
+        }
+        
+        if (srcPad && sinkPad) {
+            if (gst_pad_link(srcPad, sinkPad) != GST_PAD_LINK_OK) {
+                LOG_ERROR("Failed to link camera %zu to encoder", i);
+                gst_object_unref(srcPad);
+                gst_object_unref(sinkPad);
+                return false;
+            }
+            gst_object_unref(srcPad);
+            gst_object_unref(sinkPad);
+        } else {
+            LOG_ERROR("Failed to find pads for linking camera %zu", i);
+            if (srcPad) gst_object_unref(srcPad);
+            if (sinkPad) gst_object_unref(sinkPad);
             return false;
         }
         
@@ -340,10 +416,43 @@ bool Pipeline::linkElements() {
         GstElement* tee1 = gst_element_factory_make("tee", binName);
         gst_bin_add(GST_BIN(pipeline_), tee1);
         
+        // 인코더 출력을 tee에 연결
         if (!gst_element_link(encBin1, tee1)) {
             LOG_ERROR("Failed to link encoder to tee for camera %zu", i);
             return false;
         }
+        
+        // TODO: enc2 (서브 인코더) 처리
+        if (!config.encoder2.empty()) {
+            // 서브 인코더 체인 생성
+            GstElement* encBin2 = gst_parse_bin_from_description(
+                config.encoder2.c_str(), TRUE, &error);
+            
+            if (error) {
+                LOG_ERROR("Failed to create encoder 2 for camera %zu: %s", i, error->message);
+                g_error_free(error);
+                error = nullptr;
+            } else {
+                g_snprintf(binName, sizeof(binName), "encoder2_%zu", i);
+                gst_element_set_name(encBin2, binName);
+                
+                // 파이프라인에 추가
+                gst_bin_add(GST_BIN(pipeline_), encBin2);
+                
+                // Tee 생성 및 연결
+                g_snprintf(binName, sizeof(binName), "video_enc_tee2_%zu", i);
+                GstElement* tee2 = gst_element_factory_make("tee", binName);
+                gst_bin_add(GST_BIN(pipeline_), tee2);
+                
+                if (gst_element_link(encBin2, tee2)) {
+                    LOG_INFO("Encoder2 linked for camera %zu", i);
+                } else {
+                    LOG_ERROR("Failed to link encoder2 to tee2 for camera %zu", i);
+                }
+            }
+        }
+        
+        // TODO: snapshot 처리
     }
     
     LOG_INFO("All elements linked successfully");

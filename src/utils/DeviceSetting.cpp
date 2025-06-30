@@ -115,8 +115,8 @@ bool DeviceSetting::save(const std::string& filename) {
 
 bool DeviceSetting::save() {
     if (currentFile_.empty()) {
-        LOG_ERROR("No current file set for device settings");
-        return false;
+        // 기본 파일명 사용
+        currentFile_ = "device_setting.json";
     }
     return save(currentFile_);
 }

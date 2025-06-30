@@ -56,6 +56,8 @@ struct CameraConfig {
     std::string source;
     std::string inferConfig;
     std::string encoder;
+    std::string encoder2;
+    std::string snapshot;
     int width;
     int height;
     int fps;
