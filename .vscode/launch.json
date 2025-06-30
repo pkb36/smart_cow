@@ -1,0 +1,57 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug smart_cow",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/WebRTCCamera",
+            "args": [
+                
+            ],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}/build",
+            "environment": [
+                {
+                    "name": "LD_LIBRARY_PATH",
+                    "value": "/opt/nvidia/deepstream/deepstream/lib:/usr/local/cuda-11.4/targets/aarch64-linux/lib:${env:LD_LIBRARY_PATH}"
+                }
+            ],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "setupCommands": [
+                {
+                    "description": "Enable pretty-printing for gdb",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                },
+                {
+                    "description": "Set Disassembly Flavor to Intel",
+                    "text": "-gdb-set disassembly-flavor intel",
+                    "ignoreFailures": true
+                }
+            ],
+            "preLaunchTask": "build",
+            "miDebuggerPath": "/usr/bin/gdb",
+            "logging": {
+                "trace": false,
+                "traceResponse": false,
+                "engineLogging": false
+            }
+        }
+    ],
+    "inputs": [
+        {
+            "id": "configFile",
+            "description": "Config file path",
+            "default": "RGB_yoloV7.txt",
+            "type": "promptString"
+        },
+        {
+            "id": "imageFile", 
+            "description": "Image file path",
+            "default": "test.jpg",
+            "type": "promptString"
+        }
+    ]
+}

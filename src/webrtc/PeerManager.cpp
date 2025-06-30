@@ -6,6 +6,7 @@
 
 PeerManager::PeerManager(Pipeline* pipeline, int maxPeers)
     : pipeline_(pipeline)
+    , signalingClient_(nullptr)
     , maxPeers_(maxPeers)
     , baseStreamPort_(0)
     , commSocketBasePort_(0) {
@@ -311,15 +312,15 @@ void PeerManager::handlePeerMessage(const std::string& peerId, const std::string
         if (g_strcmp0(type, "answer") == 0) {
             // answer를 시그널링 서버로 전달
             const gchar* sdp = json_object_get_string_member(obj, "sdp");
-            if (sdp && g_signalingClient) {
-                g_signalingClient->sendToPeer(peerId, "answer", sdp);
+            if (sdp && signalingClient_) {
+                signalingClient_->sendToPeer(peerId, "answer", sdp);
             }
         } else if (g_strcmp0(type, "ice_candidate") == 0) {
             // ICE candidate를 시그널링 서버로 전달
             const gchar* candidate = json_object_get_string_member(obj, "candidate");
             const gchar* sdpMLineIndex = json_object_get_string_member(obj, "sdpMLineIndex");
             
-            if (candidate && sdpMLineIndex && g_signalingClient) {
+            if (candidate && sdpMLineIndex && signalingClient_) {
                 JsonBuilder* builder = json_builder_new();
                 json_builder_begin_object(builder);
                 json_builder_set_member_name(builder, "candidate");
@@ -333,7 +334,7 @@ void PeerManager::handlePeerMessage(const std::string& peerId, const std::string
                 json_generator_set_root(gen, node);
                 
                 gchar* data = json_generator_to_data(gen, nullptr);
-                g_signalingClient->sendToPeer(peerId, "ice_candidate", data);
+                signalingClient_->sendToPeer(peerId, "ice_candidate", data);
                 
                 g_free(data);
                 g_object_unref(gen);

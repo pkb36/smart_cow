@@ -9,18 +9,16 @@ class DeviceSetting {
 public:
     struct Settings {
         // 녹화 설정
-        bool recordStatus;
-        bool recordOnOff;
+        int recordStatus;
         
         // 분석 설정
-        bool analysisStatus;
-        bool analysisOnOff;
+        int analysisStatus;
         int nvInterval;
         
         // 탐지 설정
-        bool optFlowApply;
-        bool resnet50Apply;
-        bool enableEventNotify;
+        int optFlowApply;
+        int resnet50Apply;
+        int enableEventNotify;
         
         // 온도 설정
         int tempCorrection;
@@ -30,9 +28,9 @@ public:
         int colorPalette;
         
         Settings() : 
-            recordStatus(false), recordOnOff(false),
-            analysisStatus(false), analysisOnOff(false), nvInterval(0),
-            optFlowApply(false), resnet50Apply(false), enableEventNotify(true),
+            recordStatus(0),
+            analysisStatus(0), nvInterval(0),
+            optFlowApply(0), resnet50Apply(0), enableEventNotify(1),
             tempCorrection(0), colorPalette(0), ptzStatus("off") {}
     };
     

@@ -97,7 +97,7 @@ static void handlePipeCommand(const std::string& command) {
     // 녹화 명령
     if (command == "record_start") {
         auto& settings = DeviceSetting::getInstance().getMutable();
-        settings.recordStatus = true;
+        settings.recordStatus = 1;
         
         ProcessManager& pm = ProcessManager::getInstance();
         pm.startRecording(g_config->getDeviceCount(), 
@@ -107,7 +107,7 @@ static void handlePipeCommand(const std::string& command) {
                          g_config->getRecordDuration());
     } else if (command == "record_stop") {
         auto& settings = DeviceSetting::getInstance().getMutable();
-        settings.recordStatus = false;
+        settings.recordStatus = 0;
         
         ProcessManager::getInstance().stopRecording();
     }
@@ -115,11 +115,11 @@ static void handlePipeCommand(const std::string& command) {
     // 분석 on/off
     else if (command == "analysis_on") {
         auto& settings = DeviceSetting::getInstance().getMutable();
-        settings.analysisStatus = true;
+        settings.analysisStatus = 1;
         settings.nvInterval = 0;
     } else if (command == "analysis_off") {
         auto& settings = DeviceSetting::getInstance().getMutable();
-        settings.analysisStatus = false;
+        settings.analysisStatus = 0;
         settings.nvInterval = INT32_MAX;
     }
 }
@@ -302,6 +302,8 @@ int main(int argc, char* argv[]) {
         std::string serverUrl = g_config->getServerUrl();
         g_signalingClient = std::make_unique<SignalingClient>(serverUrl, 
                                                              g_config->getCameraId());
+
+        g_peerManager->setSignalingClient(g_signalingClient.get());                                                     
         g_signalingClient->setMessageCallback(handleSignalingMessage);
         g_signalingClient->setStateCallback(handleSignalingStateChange);
         

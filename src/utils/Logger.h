@@ -1,3 +1,4 @@
+// Logger.h
 #ifndef LOGGER_H
 #define LOGGER_H
 
@@ -5,6 +6,8 @@
 #include <memory>
 #include <sstream>
 #include <mutex>
+#include <cstdarg>
+#include <cstdio>
 
 enum class LogLevel {
     TRACE = 0,
@@ -24,8 +27,14 @@ public:
     
     void log(LogLevel level, const std::string& file, int line, const std::string& message);
     
+    // 템플릿 함수 정의를 헤더에 포함
     template<typename... Args>
-    void log(LogLevel level, const std::string& file, int line, const std::string& format, Args... args);
+    void log(LogLevel level, const std::string& file, int line, const std::string& format, Args... args) {
+        // 가변 인자 포맷팅
+        char buffer[4096];
+        snprintf(buffer, sizeof(buffer), format.c_str(), args...);
+        log(level, file, line, std::string(buffer));
+    }
     
     void flush();
     void close();

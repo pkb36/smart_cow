@@ -41,7 +41,6 @@ bool SignalingClient::connect() {
         session_ = soup_session_new_with_options(
             SOUP_SESSION_SSL_STRICT, FALSE,
             SOUP_SESSION_SSL_USE_SYSTEM_CA_FILE, TRUE,
-            SOUP_SESSION_HTTPS_ALIASES, soup_session_get_features(SOUP_SESSION(session_)),
             nullptr);
     }
     

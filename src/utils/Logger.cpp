@@ -161,15 +161,6 @@ void Logger::log(LogLevel level, const std::string& file, int line, const std::s
     pImpl->log(level, file, line, message);
 }
 
-template<typename... Args>
-void Logger::log(LogLevel level, const std::string& file, int line, 
-                const std::string& format, Args... args) {
-    // 가변 인자 포맷팅
-    char buffer[4096];
-    snprintf(buffer, sizeof(buffer), format.c_str(), args...);
-    pImpl->log(level, file, line, std::string(buffer));
-}
-
 void Logger::flush() {
     pImpl->flush();
 }

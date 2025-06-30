@@ -8,6 +8,8 @@
 #include <string>
 #include <queue>
 #include <mutex>
+#include <glib.h>
+#include <gio/gio.h>
 
 // Forward declarations
 typedef struct _SoupWebsocketConnection SoupWebsocketConnection;
@@ -54,7 +56,7 @@ public:
     void setReconnectInterval(int seconds);
     
 private:
-    static void onConnected(SoupWebsocketConnection* conn, gpointer userData);
+    static void onConnected(SoupSession* session, GAsyncResult* result, gpointer userData);
     static void onMessage(SoupWebsocketConnection* conn, gint type, GBytes* message, gpointer userData);
     static void onClosed(SoupWebsocketConnection* conn, gpointer userData);
     static void onError(SoupWebsocketConnection* conn, GError* error, gpointer userData);

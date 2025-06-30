@@ -4,6 +4,15 @@
 #include "../utils/Logger.h"
 #include <sstream>
 #include <unistd.h>
+#include <arpa/inet.h>  
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <cstring>
+
+extern "C" {
+    SOCKETINFO* init_socket_comm_server(int port);
+    void close_socket_comm(SOCKETINFO* info);
+}
 
 WebRTCSenderProcess::WebRTCSenderProcess(const std::string& peerId, 
                                        int streamPort, int commSocketPort)

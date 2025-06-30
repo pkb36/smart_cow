@@ -1,5 +1,6 @@
 #include "Detector.h"
 #include "../utils/Logger.h"
+#include "../utils/DeviceSetting.h"
 #include <gstnvdsmeta.h>
 #include <chrono>
 #include <fstream>
@@ -169,23 +170,4 @@ BboxColor Detector::determineColor(int classId, const DetectedObject& obj) {
         default:
             return BboxColor::GREEN;
     }
-}
-
-DetectedObject Detector::convertToDetectedObject(NvDsObjectMeta* objMeta) {
-    DetectedObject obj;
-    
-    obj.classId = objMeta->class_id;
-    obj.confidence = objMeta->confidence;
-    
-    // 바운딩 박스
-    obj.bbox.x = static_cast<int>(objMeta->rect_params.left);
-    obj.bbox.y = static_cast<int>(objMeta->rect_params.top);
-    obj.bbox.width = static_cast<int>(objMeta->rect_params.width);
-    obj.bbox.height = static_cast<int>(objMeta->rect_params.height);
-    
-    // 색상 결정
-    obj.color = determineColor(obj.classId, obj);
-    obj.hasBbox = (obj.color != BboxColor::NONE);
-    
-    return obj;
 }

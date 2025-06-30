@@ -17,6 +17,8 @@ public:
     ~PeerManager();
     
     bool init(int baseStreamPort, int commSocketBasePort, const std::string& codecName);
+
+    void setSignalingClient(SignalingClient* client) { signalingClient_ = client; }
     
     // Peer 관리
     bool addPeer(const std::string& peerId);
@@ -40,9 +42,11 @@ private:
     void releaseStreamPort(int port);
     int allocateCommSocket();
     void releaseCommSocket(int socket);
-    
+    void handlePeerMessage(const std::string& peerId, const std::string& message);
+    void stopAllProcesses();
 private:
     Pipeline* pipeline_;
+    SignalingClient* signalingClient_;
     int maxPeers_;
     int baseStreamPort_;
     int commSocketBasePort_;

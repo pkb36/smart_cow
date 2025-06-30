@@ -5,6 +5,7 @@ project(WebRTCCamera)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+add_compile_definitions(_GNU_SOURCE)
 # DeepStream 경로 찾기
 set(DEEPSTREAM_PATH "")
 foreach(path 

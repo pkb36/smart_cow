@@ -81,7 +81,7 @@ public:
             eventRecordEncIndex_ = j.value("event_record_enc_index", 0);
             
             // HTTP 서비스
-            httpServicePort_ = j.value("http_service_port", 8080);
+            httpServicePort_ = j.value("http_service_port", "8080");
             
             LOG_INFO("Config loaded successfully from %s", filename.c_str());
             LOG_INFO("Camera ID: %s, Devices: %d, Stream base port: %d",
@@ -139,11 +139,23 @@ public:
     int eventBufferTime_;
     int recordEncIndex_;
     int eventRecordEncIndex_;
-    int httpServicePort_;
+    std::string httpServicePort_;
 };
 
 // Config 구현
 Config::Config() : pImpl(std::make_unique<Impl>()) {}
+Config::Config(const Config& other) : pImpl(std::make_unique<Impl>()) {
+    // other의 내용을 복사
+    *pImpl = *other.pImpl;
+}
+
+Config& Config::operator=(const Config& other) {
+    if (this != &other) {
+        *pImpl = *other.pImpl;
+    }
+    return *this;
+}
+
 Config::~Config() = default;
 
 bool Config::load(const std::string& filename) {

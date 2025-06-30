@@ -37,7 +37,8 @@ Pipeline::~Pipeline() {
 
 bool Pipeline::init(const Config& config) {
     // 설정 저장
-    config_ = std::make_unique<Config>(config);
+    config_ = std::make_unique<Config>();
+    *config_ = config;
     
     // GStreamer 파이프라인 생성
     if (!createPipeline()) {

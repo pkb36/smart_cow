@@ -26,18 +26,16 @@ bool DeviceSetting::load(const std::string& filename) {
         file >> j;
         
         // 녹화 설정
-        settings_.recordStatus = j.value("record_status", false);
-        settings_.recordOnOff = j.value("record_onoff", false);
+        settings_.recordStatus = j.value("record_status", 0);
         
         // 분석 설정
-        settings_.analysisStatus = j.value("analysis_status", false);
-        settings_.analysisOnOff = j.value("analsys_onoff", false);  // 오타 그대로 유지
+        settings_.analysisStatus = j.value("analysis_status", 0);
         settings_.nvInterval = j.value("nv_interval", 0);
         
         // 탐지 설정
-        settings_.optFlowApply = j.value("opt_flow_apply", false);
-        settings_.resnet50Apply = j.value("resnet50_apply", false);
-        settings_.enableEventNotify = j.value("enable_event_notify", true);
+        settings_.optFlowApply = j.value("opt_flow_apply", 0);
+        settings_.resnet50Apply = j.value("resnet50_apply", 0);
+        settings_.enableEventNotify = j.value("enable_event_notify", 1);
         
         // 온도 설정
         settings_.tempCorrection = j.value("temp_correction", 0);
@@ -74,11 +72,9 @@ bool DeviceSetting::save(const std::string& filename) {
         
         // 녹화 설정
         j["record_status"] = settings_.recordStatus;
-        j["record_onoff"] = settings_.recordOnOff;
         
         // 분석 설정
         j["analysis_status"] = settings_.analysisStatus;
-        j["analsys_onoff"] = settings_.analysisOnOff;  // 오타 그대로 유지
         j["nv_interval"] = settings_.nvInterval;
         
         // 탐지 설정
@@ -128,7 +124,6 @@ bool DeviceSetting::save() {
 void DeviceSetting::setRecordStatus(bool status) {
     if (settings_.recordStatus != status) {
         settings_.recordStatus = status;
-        settings_.recordOnOff = status;  // 동기화
         changed_ = true;
         LOG_INFO("Record status changed to: %s", status ? "ON" : "OFF");
     }
@@ -137,7 +132,6 @@ void DeviceSetting::setRecordStatus(bool status) {
 void DeviceSetting::setAnalysisStatus(bool status) {
     if (settings_.analysisStatus != status) {
         settings_.analysisStatus = status;
-        settings_.analysisOnOff = status;  // 동기화
         changed_ = true;
         LOG_INFO("Analysis status changed to: %s", status ? "ON" : "OFF");
     }

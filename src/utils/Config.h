@@ -8,6 +8,8 @@
 class Config {
 public:
     Config();
+    Config(const Config& other);
+    Config& operator=(const Config& other);
     ~Config();
 
     bool load(const std::string& filename);
