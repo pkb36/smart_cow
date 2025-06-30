@@ -33,42 +33,46 @@ public:
                 ttyBaudrate_ = tty.value("baudrate", 38400);
             }
             
-            // 카메라 설정
-            config_.cameras.clear();
-            for (int i = 0; i < config_.deviceCount; i++) {
-                std::string videoKey = "video" + std::to_string(i);
+            if (j.contains("cameras") && j["cameras"].is_array()) {
+                config_.cameras.clear();
                 
-                if (j.contains(videoKey)) {
-                    auto video = j[videoKey];
-                    CameraConfig cam;
+                for (const auto& cam : j["cameras"]) {
+                    CameraConfig camera;
                     
-                    cam.type = (i == 0) ? CameraType::RGB : CameraType::THERMAL;
-                    cam.source = video.value("src", "");
-                    cam.encoder = video.value("enc", "");
-                    cam.encoder2 = video.value("enc2", "");  // 서브 인코더
-                    cam.snapshot = video.value("snapshot", "");  // 스냅샷
-
-                    // 추론 설정 파일 추출
-                    std::string infer = video.value("infer", "");
-                    size_t configPos = infer.find("config-file-path=");
-                    if (configPos != std::string::npos) {
-                        size_t start = configPos + 17;  // "config-file-path=" 길이
-                        size_t end = infer.find(" ", start);
-                        if (end == std::string::npos) {
-                            cam.inferConfig = infer.substr(start);
-                        } else {
-                            cam.inferConfig = infer.substr(start, end - start);
-                        }
+                    camera.name = cam.value("name", "");
+                    camera.type = (cam.value("type", "") == "rgb") ? 
+                                CameraType::RGB : CameraType::THERMAL;
+                    
+                    // 소스 설정
+                    if (cam.contains("source")) {
+                        auto src = cam["source"];
+                        camera.source.protocol = src.value("protocol", "udp");
+                        camera.source.port = src.value("port", 0);
+                        camera.source.encoding = src.value("encoding", "h264");
+                        camera.source.width = src.value("width", 1920);
+                        camera.source.height = src.value("height", 1080);
+                        camera.source.framerate = src.value("framerate", 30);
                     }
                     
-                    // 해상도/FPS 파싱 (source 문자열에서 추출)
-                    parseVideoFormat(cam.source, cam);
+                    // 추론 설정
+                    if (cam.contains("inference")) {
+                        auto inf = cam["inference"];
+                        camera.inference.enabled = inf.value("enabled", false);
+                        camera.inference.config_file = inf.value("config_file", "");
+                        camera.inference.scale_width = inf.value("scale_width", 1280);
+                        camera.inference.scale_height = inf.value("scale_height", 720);
+                    }
                     
-                    config_.cameras.push_back(cam);
+                    // 인코더 설정
+                    if (cam.contains("encoder")) {
+                        auto enc = cam["encoder"];
+                        camera.encoder.codec = enc.value("codec", "h264");
+                        camera.encoder.preset = enc.value("preset", "fast");
+                        camera.encoder.bitrate = enc.value("bitrate", 2000000);
+                        camera.encoder.idr_interval = enc.value("idr_interval", 30);
+                    }
                     
-                    LOG_INFO("Camera %d: %s, %dx%d@%dfps, infer=%s", 
-                             i, (cam.type == CameraType::RGB) ? "RGB" : "THERMAL",
-                             cam.width, cam.height, cam.fps, cam.inferConfig.c_str());
+                    config_.cameras.push_back(camera);
                 }
             }
             
@@ -97,35 +101,6 @@ public:
         } catch (const std::exception& e) {
             LOG_ERROR("Config loading error: %s", e.what());
             return false;
-        }
-    }
-    
-private:
-    void parseVideoFormat(const std::string& source, CameraConfig& cam) {
-        // 기본값
-        cam.width = 1280;
-        cam.height = 720;
-        cam.fps = 30;
-        
-        // width 파싱
-        size_t widthPos = source.find("width=");
-        if (widthPos != std::string::npos) {
-            cam.width = std::stoi(source.substr(widthPos + 6));
-        }
-        
-        // height 파싱
-        size_t heightPos = source.find("height=");
-        if (heightPos != std::string::npos) {
-            cam.height = std::stoi(source.substr(heightPos + 7));
-        }
-        
-        // framerate 파싱 (format: framerate=30/1)
-        size_t fpsPos = source.find("framerate=");
-        if (fpsPos != std::string::npos) {
-            size_t slashPos = source.find("/", fpsPos);
-            if (slashPos != std::string::npos) {
-                cam.fps = std::stoi(source.substr(fpsPos + 10, slashPos - fpsPos - 10));
-            }
         }
     }
     
@@ -223,7 +198,7 @@ int Config::getEventBufferTime() const {
 std::string Config::getCodecName() const {
     // 첫 번째 비디오 인코더에서 코덱 추출
     if (!pImpl->config_.cameras.empty()) {
-        const std::string& encoder = pImpl->config_.cameras[0].encoder;
+        const std::string& encoder = pImpl->config_.cameras[0].encoder.codec;
         if (encoder.find("vp8") != std::string::npos) return "VP8";
         if (encoder.find("vp9") != std::string::npos) return "VP9";
         if (encoder.find("264") != std::string::npos) return "H264";

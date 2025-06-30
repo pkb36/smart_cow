@@ -117,7 +117,7 @@ bool CommandPipe::sendCommand(const std::string& pipePath, const std::string& co
         return false;
     }
     
-    LOG_DEBUG("Command sent to pipe: %s", command.c_str());
+    // LOG_DEBUG("Command sent to pipe: %s", command.c_str());
     return true;
 }
 

@@ -12,6 +12,8 @@ SignalingClient::SignalingClient(const std::string& serverUrl, const std::string
     , state_(ConnectionState::DISCONNECTED)
     , autoReconnect_(true)
     , reconnectInterval_(5) {
+
+    serverUrl_ = serverUrl + "/signaling/" + cameraId + "/?token=test&peerType=camera";
     
     LOG_INFO("SignalingClient created for camera %s, server: %s",
              cameraId.c_str(), serverUrl.c_str());
@@ -110,7 +112,7 @@ bool SignalingClient::sendMessage(const std::string& type, const std::string& da
     // 메시지 전송
     soup_websocket_connection_send_text(connection_, message);
     
-    LOG_DEBUG("Sent message: type=%s, data_len=%zu", type.c_str(), data.length());
+    LOG_INFO("Sent message: type=%s, data_len=%zu json=%s", type.c_str(), data.length(), message);
     
     g_free(message);
     g_object_unref(generator);
@@ -164,15 +166,22 @@ void SignalingClient::setStateCallback(StateCallback callback) {
 }
 
 bool SignalingClient::registerCamera() {
-    // 카메라 등록 메시지 생성
+    // JSON 메시지 생성
     JsonBuilder* builder = json_builder_new();
     json_builder_begin_object(builder);
-    json_builder_set_member_name(builder, "msg_type");
-    json_builder_add_string_value(builder, "client_msg");
-    json_builder_set_member_name(builder, "client_type");
+    json_builder_set_member_name(builder, "action");
+    json_builder_add_string_value(builder, "register");
+    json_builder_set_member_name(builder, "peerType");
     json_builder_add_string_value(builder, "camera");
-    json_builder_set_member_name(builder, "peer_id");
-    json_builder_add_string_value(builder, cameraId_.c_str());
+    json_builder_set_member_name(builder, "message");
+    json_builder_begin_object(builder);
+        json_builder_set_member_name(builder, "name");
+        json_builder_add_string_value(builder, "udpsink-webrtc");
+        json_builder_set_member_name(builder, "fw_version");
+        json_builder_add_string_value(builder, "1.0.0");
+        json_builder_set_member_name(builder, "ai_version");
+        json_builder_add_string_value(builder, "0.1.0");
+    json_builder_end_object(builder);
     json_builder_end_object(builder);
     
     JsonGenerator* generator = json_generator_new();
@@ -180,17 +189,134 @@ bool SignalingClient::registerCamera() {
     json_generator_set_root(generator, root);
     
     gchar* message = json_generator_to_data(generator, nullptr);
-    bool result = sendMessage("register", message);
+    
+    // WebSocket으로 직접 전송
+    soup_websocket_connection_send_text(connection_, message);
+    
+    LOG_INFO("Camera registration sent: %s", message);
     
     g_free(message);
     g_object_unref(generator);
     g_object_unref(builder);
     
-    if (result) {
-        LOG_INFO("Camera registration sent: %s", cameraId_.c_str());
-    }
+    return true;
+}
+
+void SignalingClient::sendSdpOffer(const std::string& peerId, const std::string& sdp)
+{
+    JsonBuilder* builder = json_builder_new();
+    json_builder_begin_object(builder);
+    json_builder_set_member_name(builder, "action");
+    json_builder_add_string_value(builder, "offer");
+    json_builder_set_member_name(builder, "peerType");
+    json_builder_add_string_value(builder, "camera");
+    json_builder_set_member_name(builder, "message");
+    json_builder_begin_object(builder);
+        json_builder_set_member_name(builder, "peer_id");
+        json_builder_add_string_value(builder, peerId.c_str());
+        json_builder_set_member_name(builder, "sdp");
+        json_builder_begin_object(builder);
+            json_builder_set_member_name(builder, "type");
+            json_builder_add_string_value(builder, "offer");
+            json_builder_set_member_name(builder, "sdp");
+            json_builder_add_string_value(builder, sdp.c_str());
+        json_builder_end_object(builder);
+    json_builder_end_object(builder);
+    json_builder_end_object(builder);
+
+    JsonGenerator* generator = json_generator_new();
+    JsonNode* root = json_builder_get_root(builder);
+    json_generator_set_root(generator, root);
     
-    return result;
+    gchar* message = json_generator_to_data(generator, nullptr);
+    
+    // WebSocket으로 직접 전송
+    soup_websocket_connection_send_text(connection_, message);
+    
+    LOG_INFO("Camera SdpOffer sent: %s", message);
+    
+    g_free(message);
+    g_object_unref(generator);
+    g_object_unref(builder);
+}
+
+void SignalingClient::sendIceCandidate(const std::string& peerId, int mlineindex, const std::string& candidate)
+{
+    JsonBuilder* builder = json_builder_new();
+    json_builder_begin_object(builder);
+    json_builder_set_member_name(builder, "action");
+    json_builder_add_string_value(builder, "candidate");
+    json_builder_set_member_name(builder, "peerType");
+    json_builder_add_string_value(builder, "camera");
+    json_builder_set_member_name(builder, "message");
+    json_builder_begin_object(builder);
+        json_builder_set_member_name(builder, "peer_id");
+        json_builder_add_string_value(builder, peerId.c_str());
+        json_builder_set_member_name(builder, "ice");
+        json_builder_begin_object(builder);
+            json_builder_set_member_name(builder, "candidate");
+            json_builder_add_string_value(builder, candidate.c_str());
+            json_builder_set_member_name(builder, "sdpMLineIndex");
+            json_builder_add_int_value(builder, mlineindex);
+            json_builder_set_member_name(builder, "sdpMid");
+            gchar* sdpMid = g_strdup_printf("video%d", mlineindex);
+            json_builder_add_string_value(builder, sdpMid);
+            g_free(sdpMid);
+        json_builder_end_object(builder);
+    json_builder_end_object(builder);
+    json_builder_end_object(builder);
+
+    JsonGenerator* generator = json_generator_new();
+    JsonNode* root = json_builder_get_root(builder);
+    json_generator_set_root(generator, root);
+    
+    gchar* message = json_generator_to_data(generator, nullptr);
+    
+    // WebSocket으로 직접 전송
+    soup_websocket_connection_send_text(connection_, message);
+    
+    LOG_INFO("Camera IceCandidate sent: %s", message);
+    
+    g_free(message);
+    g_object_unref(generator);
+    g_object_unref(builder);
+}
+
+void SignalingClient::sendCameraStatus()
+{
+    JsonBuilder* builder = json_builder_new();
+    json_builder_begin_object(builder);
+    json_builder_set_member_name(builder, "action");
+    json_builder_add_string_value(builder, "camstatus");
+    json_builder_set_member_name(builder, "peerType");
+    json_builder_add_string_value(builder, "camera");
+    json_builder_set_member_name(builder, "message");
+    json_builder_begin_object(builder);
+        json_builder_set_member_name(builder, "rec_status");
+        json_builder_add_string_value(builder, "On");
+        json_builder_set_member_name(builder, "cpu_temperature");
+        json_builder_add_double_value(builder, 65.5);
+        json_builder_set_member_name(builder, "gpu_temperature");
+        json_builder_add_double_value(builder, 72.3);
+        json_builder_set_member_name(builder, "rec_usage");
+        json_builder_add_int_value(builder, 80);
+    json_builder_end_object(builder);
+    json_builder_end_object(builder);
+
+    JsonGenerator* generator = json_generator_new();
+    JsonNode* root = json_builder_get_root(builder);
+    json_generator_set_root(generator, root);
+    
+    gchar* message = json_generator_to_data(generator, nullptr);
+    
+    // WebSocket으로 직접 전송
+    soup_websocket_connection_send_text(connection_, message);
+    
+    LOG_INFO("Camera Status sent: %s", message);
+    
+    g_free(message);
+    g_object_unref(generator);
+    g_object_unref(builder);
 }
 
 void SignalingClient::enableAutoReconnect(bool enable) {

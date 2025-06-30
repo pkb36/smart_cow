@@ -319,21 +319,6 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         
-        // 이벤트 버퍼 프로세스 시작
-        for (int i = 0; i < g_config->getDeviceCount(); i++) {
-            // 이벤트 레코더용 포트 계산
-            int eventPort = g_config->getStreamBasePort() + 
-                           (g_config->getMaxStreamCount() + 1) * g_config->getDeviceCount() + i;
-            
-            std::ostringstream cmd;
-            cmd << "./record_event_buffer.sh " 
-                << g_config->getEventBufferTime() << " "
-                << eventPort;
-            
-            ProcessManager::getInstance().startProcess(
-                "event_buffer_" + std::to_string(i), cmd.str());
-        }
-        
         // 시그널링 서버 연결
         g_signalingClient->connect();
         

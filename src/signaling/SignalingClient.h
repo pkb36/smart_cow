@@ -50,7 +50,9 @@ public:
     
     // 카메라 등록
     bool registerCamera();
-    
+    void sendSdpOffer(const std::string& peerId, const std::string& sdp);
+    void sendIceCandidate(const std::string& peerId, int mlineindex, const std::string& candidate);
+    void sendCameraStatus();
     // 재연결
     void enableAutoReconnect(bool enable);
     void setReconnectInterval(int seconds);

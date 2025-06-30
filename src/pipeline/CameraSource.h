@@ -28,9 +28,13 @@ public:
     
     // 검출 버퍼 접근
     DetectionBuffer* getDetectionBuffer() const;
-    
+    bool createPipeline(const CameraConfig& config);
+    bool createSourceChain(const CameraConfig& config);
+    bool createInferenceChain(const CameraConfig& config);
+    bool createEncoderChain(const CameraConfig& config);
+    bool linkElements(const CameraConfig& config);
+    bool addProbes();
 private:
-    bool createElements(const CameraConfig& config);
     bool parseAndCreateSource(const std::string& sourceStr);
     bool addElementsToPipeline(GstElement* pipeline);
     bool linkInternalElements();
@@ -40,6 +44,7 @@ private:
 private:
     CameraType type_;
     int index_;
+    GstElement* pipeline_; 
     
     // GStreamer 요소들
     GstElement* source_;
@@ -61,6 +66,40 @@ private:
     
     // 설정
     CameraConfig config_;
+
+    struct Elements {
+        // 소스 체인
+        GstElement* udpsrc;
+        GstElement* rtpdepay;
+        GstElement* parser;
+        GstElement* decoder;
+        GstElement* converter1;
+        GstElement* clockoverlay;
+        GstElement* videorate;
+        GstElement* capsfilter;
+        GstElement* queue1;
+        GstElement* tee;
+        
+        // 추론 체인
+        GstElement* queue2;
+        GstElement* videoscale;
+        GstElement* converter2;
+        GstElement* mux;
+        GstElement* infer;
+        GstElement* nvof;
+        GstElement* converter3;
+        GstElement* postproc;
+        GstElement* osd;
+        GstElement* converter4;
+        
+        // 인코더 체인
+        GstElement* queue3;
+        GstElement* encoder_convert;
+        GstElement* encoder;
+        GstElement* payloader;
+        GstElement* queue4;
+        GstElement* sink;
+    } elements_;
 };
 
 #endif // CAMERA_SOURCE_H

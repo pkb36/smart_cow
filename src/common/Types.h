@@ -51,16 +51,50 @@ struct DetectionData {
     std::vector<DetectedObject> objects;
 };
 
-struct CameraConfig {
-    CameraType type;
-    std::string source;
-    std::string inferConfig;
-    std::string encoder;
-    std::string encoder2;
-    std::string snapshot;
+// struct CameraConfig {
+//     CameraType type;
+//     std::string source;
+//     std::string inferConfig;
+//     std::string encoder;
+//     std::string encoder2;
+//     std::string snapshot;
+//     int width;
+//     int height;
+//     int fps;
+// };
+
+struct SourceConfig {
+    std::string protocol;  // "udp", "rtsp", "file"
+    int port;
+    std::string encoding;  // "h264", "h265"
     int width;
     int height;
-    int fps;
+    int framerate;
+};
+
+struct InferenceConfig {
+    bool enabled;
+    std::string config_file;
+    int scale_width;
+    int scale_height;
+};
+
+struct EncoderConfig {
+    std::string codec;  // "h264", "h265"
+    std::string preset;  // "fast", "medium", "slow"
+    int bitrate;
+    int idr_interval;
+};
+
+struct CameraConfig {
+    std::string name;
+    CameraType type;
+    SourceConfig source;
+    InferenceConfig inference;
+    EncoderConfig encoder;
+    
+    // 기존 필드들은 deprecated
+    std::string inferConfig;  // deprecated
 };
 
 struct SystemConfig {
@@ -72,5 +106,4 @@ struct SystemConfig {
     std::string snapshotPath;
     int apiPort;
 };
-
 #endif // TYPES_H
