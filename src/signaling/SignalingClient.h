@@ -39,6 +39,7 @@ public:
     bool connect();
     void disconnect();
     bool isConnected() const;
+    bool isWebSocketOpen() const;
     
     // 메시지 전송
     bool sendMessage(const std::string& type, const std::string& data);
@@ -56,6 +57,19 @@ public:
     // 재연결
     void enableAutoReconnect(bool enable);
     void setReconnectInterval(int seconds);
+
+    // 상태 전송 관련
+    void startStatusReporting(int intervalSeconds = 30);
+    void stopStatusReporting();
+    void updateCameraStatus(const std::string& recStatus, 
+                           double cpuTemp, 
+                           double gpuTemp, 
+                           int recUsage);
+
+    // 카메라 상태 정보
+    static double getCpuTemperature();
+    static double getGpuTemperature();
+    static int getDiskUsage();
     
 private:
     static void onConnected(SoupSession* session, GAsyncResult* result, gpointer userData);
@@ -83,6 +97,21 @@ private:
     
     std::thread reconnectThread_;
     std::mutex connectionMutex_;
+
+    // 상태 정보
+    struct CameraStatus {
+        std::string recStatus = "Off";
+        double cpuTemperature = 0.0;
+        double gpuTemperature = 0.0;
+        int recUsage = 0;
+    };
+    
+    CameraStatus cameraStatus_;
+    guint statusTimerId_;
+    int statusInterval_;
+    std::mutex statusMutex_;
+    
+    static gboolean statusTimerCallback(gpointer userData);
 };
 
 #endif // SIGNALING_CLIENT_H

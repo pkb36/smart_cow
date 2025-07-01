@@ -6,6 +6,7 @@
 #include <mutex>
 #include <string>
 #include <sys/types.h>
+#include "../pipeline/Pipeline.h"
 #include "../signaling/SignalingClient.h"
 
 class WebRTCSenderProcess;

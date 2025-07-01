@@ -5,7 +5,9 @@
 #include <memory>
 #include <thread>
 #include <atomic>
-
+#include <fstream>
+#include <sys/statvfs.h>
+#include <chrono>
 // Pipeline
 #include "pipeline/Pipeline.h"
 #include "pipeline/CameraSource.h"
@@ -38,6 +40,85 @@ static std::unique_ptr<ApiServer> g_apiServer;
 static std::unique_ptr<SignalingClient> g_signalingClient;
 static std::unique_ptr<PeerManager> g_peerManager;
 static std::unique_ptr<CommandPipe> g_commandPipe;
+
+class StatusReporter {
+public:
+    StatusReporter(SignalingClient* client) 
+        : client_(client)
+        , running_(true) {
+        
+        thread_ = std::thread([this]() {
+            while (running_) {
+                updateStatus();
+                std::this_thread::sleep_for(std::chrono::seconds(5));
+            }
+        });
+    }
+    
+    ~StatusReporter() {
+        stop();
+    }
+    
+    void stop() {
+        running_ = false;
+        if (thread_.joinable()) {
+            thread_.join();
+        }
+    }
+    
+private:
+    void updateStatus() {
+        try {
+            double cpuTemp = getCpuTemperature();
+            double gpuTemp = getGpuTemperature();
+            int diskUsage = getDiskUsage();
+            
+            client_->updateCameraStatus("Off", cpuTemp, gpuTemp, diskUsage);
+        } catch (const std::exception& e) {
+            LOG_ERROR("Status update error: %s", e.what());
+        }
+    }
+    
+    double getCpuTemperature() {
+        std::ifstream file("/sys/devices/virtual/thermal/thermal_zone0/temp");
+        if (file.is_open()) {
+            int temp;
+            file >> temp;
+            file.close();
+            return temp / 1000.0;
+        }
+        return 0.0;
+    }
+    
+    double getGpuTemperature() {
+        std::ifstream file("/sys/devices/virtual/thermal/thermal_zone1/temp");
+        if (file.is_open()) {
+            int temp;
+            file >> temp;
+            file.close();
+            return temp / 1000.0;
+        }
+        return 0.0;
+    }
+    
+    int getDiskUsage() {
+        struct statvfs stat;
+        if (statvfs("/", &stat) == 0) {
+            unsigned long total = stat.f_blocks * stat.f_frsize;
+            unsigned long available = stat.f_bavail * stat.f_frsize;
+            unsigned long used = total - available;
+            return (int)((used * 100) / total);
+        }
+        return 0;
+    }
+    
+private:
+    SignalingClient* client_;
+    std::atomic<bool> running_;
+    std::thread thread_;
+};
+
+static std::unique_ptr<StatusReporter> g_statusReporter;
 
 // 시그널 핸들러
 static void signalHandler(int sig) {
@@ -229,7 +310,8 @@ int main(int argc, char* argv[]) {
     gst_init(&argc, &argv);
     
     // 로거 초기화
-    Logger::getInstance().init("./logs", LogLevel::INFO);
+
+    Logger::getInstance().init("./logs", LogLevel::DEBUG);
     
     LOG_INFO("========================================");
     LOG_INFO("WebRTC Camera System Starting...");
@@ -320,8 +402,13 @@ int main(int argc, char* argv[]) {
         }
         
         // 시그널링 서버 연결
-        g_signalingClient->connect();
-        
+        if (g_signalingClient->connect()) {
+            // StatusReporter가 자동으로 스레드 관리
+            g_statusReporter = std::make_unique<StatusReporter>(g_signalingClient.get());
+            
+            // 30초마다 서버로 전송
+            g_signalingClient->startStatusReporting(30);
+        }
         // 메인 루프 생성
         g_mainLoop = g_main_loop_new(nullptr, FALSE);
         

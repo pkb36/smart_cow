@@ -5,6 +5,8 @@
 #include <string>
 #include <gst/gst.h>
 #include <gstnvdsmeta.h>
+#include <unordered_map>
+#include <mutex>
 
 #include "../common/Types.h"
 
@@ -34,6 +36,12 @@ public:
     bool createEncoderChain(const CameraConfig& config);
     bool linkElements(const CameraConfig& config);
     bool addProbes();
+
+    // 동적 피어 관리
+    bool addPeerOutput(const std::string& peerId, int streamPort);
+    bool removePeerOutput(const std::string& peerId);
+    GstElement* getMainTee() const { return elements_.main_tee; }
+
 private:
     bool parseAndCreateSource(const std::string& sourceStr);
     bool addElementsToPipeline(GstElement* pipeline);
@@ -104,6 +112,18 @@ private:
         GstElement* udpsink;
         GstElement* rtppay;
     } elements_;
+
+    struct PeerOutput {
+        std::string peerId;
+        int port;
+        GstElement* queue;
+        GstElement* udpsink;
+        GstPad* teeSrcPad;
+        GstPad* queueSinkPad;
+    };
+    
+    std::unordered_map<std::string, std::unique_ptr<PeerOutput>> peerOutputs_;
+    mutable std::mutex peerOutputsMutex_;
 };
 
 #endif // CAMERA_SOURCE_H

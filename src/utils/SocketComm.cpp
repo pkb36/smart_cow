@@ -1,79 +1,23 @@
 #include "SocketComm.h"
 #include "Logger.h"
-#include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <cstring>
-#include <fcntl.h>
-#include <netinet/in.h>
-#include <signal.h>
-#include <unistd.h>
+#include <errno.h>
 
-// 기존 C 함수들 (extern "C"로 래핑)
-extern "C" {
-    
-SOCKETINFO* init_socket_comm_server(int port) {
-    SOCKETINFO* info = new SOCKETINFO;
-    memset(info, 0, sizeof(SOCKETINFO));
-    info->port = port;
-    
-    // 서버 소켓 생성
-    info->socket = socket(AF_INET, SOCK_STREAM, 0);
-    if (info->socket < 0) {
-        delete info;
-        return nullptr;
-    }
-    
-    // SO_REUSEADDR 설정
-    int opt = 1;
-    setsockopt(info->socket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-    
-    // 바인드
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
-    addr.sin_port = htons(port);
-    
-    if (bind(info->socket, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        close(info->socket);
-        delete info;
-        return nullptr;
-    }
-    
-    // 리슨
-    if (listen(info->socket, 1) < 0) {
-        close(info->socket);
-        delete info;
-        return nullptr;
-    }
-    
-    return info;
-}
-
-void close_socket_comm(SOCKETINFO* info) {
-    if (info) {
-        if (info->socket >= 0) {
-            close(info->socket);
-        }
-        delete info;
-    }
-}
-
-}  // extern "C"
-
-// SocketComm 클래스 구현
 SocketComm::SocketComm(Type type, int port)
     : type_(type)
     , port_(port)
-    , socketInfo_(nullptr)
-    , running_(false) {
+    , listenSocket_(-1)
+    , clientSocket_(-1)
+    , running_(false)
+    , connected_(false) {
 }
 
 SocketComm::~SocketComm() {
-    Close();
+    close();
 }
 
 bool SocketComm::startServer() {
@@ -82,19 +26,47 @@ bool SocketComm::startServer() {
         return false;
     }
     
-    socketInfo_ = init_socket_comm_server(port_);
-    if (!socketInfo_) {
-        LOG_ERROR("Failed to create server socket on port %d", port_);
+    // 리스닝 소켓 생성
+    listenSocket_ = socket(AF_INET, SOCK_STREAM, 0);
+    if (listenSocket_ < 0) {
+        LOG_ERROR("Failed to create socket: %s", strerror(errno));
         return false;
     }
     
-    // 콜백 설정
-    socketInfo_->call_fun = &SocketComm::cCallbackWrapper;
-    socketInfo_->data = this;
+    // SO_REUSEADDR 설정
+    int opt = 1;
+    if (setsockopt(listenSocket_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+        LOG_ERROR("Failed to set SO_REUSEADDR: %s", strerror(errno));
+        ::close(listenSocket_);
+        listenSocket_ = -1;
+        return false;
+    }
+    
+    // 바인드
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = htons(port_);
+    
+    if (bind(listenSocket_, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        LOG_ERROR("Failed to bind on port %d: %s", port_, strerror(errno));
+        ::close(listenSocket_);
+        listenSocket_ = -1;
+        return false;
+    }
+    
+    // 리슨
+    if (listen(listenSocket_, 5) < 0) {  // 백로그 5
+        LOG_ERROR("Failed to listen: %s", strerror(errno));
+        ::close(listenSocket_);
+        listenSocket_ = -1;
+        return false;
+    }
     
     // 서버 스레드 시작
     running_ = true;
-    thread_ = std::thread(&SocketComm::serverThread, this);
+    serverThread_ = std::thread(&SocketComm::serverThread, this);
     
     LOG_INFO("Socket server started on port %d", port_);
     return true;
@@ -106,16 +78,10 @@ bool SocketComm::connectToServer(const std::string& host) {
         return false;
     }
     
-    socketInfo_ = new SOCKETINFO;
-    memset(socketInfo_, 0, sizeof(SOCKETINFO));
-    socketInfo_->port = port_;
-    
     // 클라이언트 소켓 생성
-    socketInfo_->socket = socket(AF_INET, SOCK_STREAM, 0);
-    if (socketInfo_->socket < 0) {
-        LOG_ERROR("Failed to create client socket");
-        delete socketInfo_;
-        socketInfo_ = nullptr;
+    clientSocket_ = socket(AF_INET, SOCK_STREAM, 0);
+    if (clientSocket_ < 0) {
+        LOG_ERROR("Failed to create socket: %s", strerror(errno));
         return false;
     }
     
@@ -127,96 +93,121 @@ bool SocketComm::connectToServer(const std::string& host) {
     
     if (inet_pton(AF_INET, host.c_str(), &serverAddr.sin_addr) <= 0) {
         LOG_ERROR("Invalid address: %s", host.c_str());
-        close(socketInfo_->socket);
-        delete socketInfo_;
-        socketInfo_ = nullptr;
+        ::close(clientSocket_);
+        clientSocket_ = -1;
         return false;
     }
     
     // 연결
-    if (connect(socketInfo_->socket, (struct sockaddr*)&serverAddr, sizeof(serverAddr)) < 0) {
-        LOG_ERROR("Connection to %s:%d failed", host.c_str(), port_);
-        close(socketInfo_->socket);
-        delete socketInfo_;
-        socketInfo_ = nullptr;
+    if (connect(clientSocket_, (struct sockaddr*)&serverAddr, sizeof(serverAddr)) < 0) {
+        LOG_ERROR("Connection to %s:%d failed: %s", host.c_str(), port_, strerror(errno));
+        ::close(clientSocket_);
+        clientSocket_ = -1;
         return false;
     }
     
-    socketInfo_->connect = 1;
-    socketInfo_->call_fun = &SocketComm::cCallbackWrapper;
-    socketInfo_->data = this;
+    connected_ = true;
+    if (connectionCallback_) {
+        connectionCallback_(true);
+    }
     
     // 수신 스레드 시작
     running_ = true;
-    thread_ = std::thread(&SocketComm::receiveThread, this);
+    receiveThread_ = std::thread(&SocketComm::receiveMessages, this, clientSocket_);
     
     LOG_INFO("Connected to %s:%d", host.c_str(), port_);
     return true;
 }
 
 bool SocketComm::sendMessage(const std::string& message) {
-    if (!socketInfo_ || !socketInfo_->connect) {
-        LOG_ERROR("Socket not connected");
+    if (!connected_) {
+        LOG_ERROR("Not connected");
         return false;
     }
     
-    // 메시지 길이 + 메시지 전송 (프로토콜에 따라)
-    uint32_t msgLen = message.length();
+    int socket = (type_ == Type::SERVER) ? clientSocket_ : clientSocket_;
+    if (socket < 0) {
+        LOG_ERROR("Invalid socket");
+        return false;
+    }
     
-    // 길이 전송 (네트워크 바이트 순서)
+    std::lock_guard<std::mutex> lock(sendMutex_);
+    
+    // 프로토콜: [4바이트 길이][메시지]
+    uint32_t msgLen = message.length();
     uint32_t netLen = htonl(msgLen);
-    if (send(socketInfo_->socket, &netLen, sizeof(netLen), 0) != sizeof(netLen)) {
-        LOG_ERROR("Failed to send message length");
+    
+    // 길이 전송
+    if (send(socket, &netLen, sizeof(netLen), MSG_NOSIGNAL) != sizeof(netLen)) {
+        LOG_ERROR("Failed to send message length: %s", strerror(errno));
         return false;
     }
     
     // 메시지 전송
-    size_t sent = 0;
-    while (sent < message.length()) {
-        ssize_t ret = send(socketInfo_->socket, message.c_str() + sent, 
-                          message.length() - sent, 0);
-        if (ret < 0) {
+    size_t totalSent = 0;
+    while (totalSent < message.length()) {
+        ssize_t sent = send(socket, message.c_str() + totalSent, 
+                           message.length() - totalSent, MSG_NOSIGNAL);
+        if (sent < 0) {
             LOG_ERROR("Failed to send message: %s", strerror(errno));
             return false;
         }
-        sent += ret;
+        totalSent += sent;
     }
     
-    LOG_DEBUG("Sent message (%zu bytes): %s", message.length(), message.c_str());
+    LOG_DEBUG("Sent message (%zu bytes)", message.length());
     return true;
 }
 
 void SocketComm::setMessageCallback(MessageCallback callback) {
-    callback_ = callback;
+    messageCallback_ = callback;
 }
 
-void SocketComm::Close() {
+void SocketComm::setConnectionCallback(ConnectionCallback callback) {
+    connectionCallback_ = callback;
+}
+
+void SocketComm::close() {
     running_ = false;
+    connected_ = false;
     
-    if (thread_.joinable()) {
-        thread_.join();
+    // 소켓 닫기
+    if (listenSocket_ >= 0) {
+        ::close(listenSocket_);
+        listenSocket_ = -1;
     }
     
-    if (socketInfo_) {
-        close_socket_comm(socketInfo_);
-        socketInfo_ = nullptr;
+    if (clientSocket_ >= 0) {
+        ::close(clientSocket_);
+        clientSocket_ = -1;
+    }
+    
+    // 스레드 종료 대기
+    if (serverThread_.joinable()) {
+        serverThread_.join();
+    }
+    
+    if (receiveThread_.joinable()) {
+        receiveThread_.join();
     }
 }
 
 bool SocketComm::isConnected() const {
-    return socketInfo_ && socketInfo_->connect;
+    return connected_;
 }
 
 void SocketComm::serverThread() {
+    LOG_DEBUG("Server thread started");
+    
     while (running_) {
         struct sockaddr_in clientAddr;
         socklen_t clientLen = sizeof(clientAddr);
         
-        // Accept 연결
-        int clientSocket = accept(socketInfo_->socket, 
-                                 (struct sockaddr*)&clientAddr, &clientLen);
-        if (clientSocket < 0) {
-            if (running_) {
+        // 클라이언트 연결 대기
+        int newClientSocket = accept(listenSocket_, 
+                                    (struct sockaddr*)&clientAddr, &clientLen);
+        if (newClientSocket < 0) {
+            if (running_ && errno != EINTR) {
                 LOG_ERROR("Accept failed: %s", strerror(errno));
             }
             continue;
@@ -225,67 +216,80 @@ void SocketComm::serverThread() {
         LOG_INFO("Client connected from %s:%d", 
                  inet_ntoa(clientAddr.sin_addr), ntohs(clientAddr.sin_port));
         
-        // 기존 연결 종료
-        if (socketInfo_->connect) {
-            close(socketInfo_->socket);
+        // 기존 클라이언트 연결이 있으면 닫기
+        if (clientSocket_ >= 0) {
+            LOG_INFO("Closing previous client connection");
+            connected_ = false;
+            ::close(clientSocket_);
         }
         
-        // 새 연결 설정
-        socketInfo_->socket = clientSocket;
-        socketInfo_->connect = 1;
+        // 새 클라이언트 설정
+        clientSocket_ = newClientSocket;
+        connected_ = true;
         
-        // 수신 처리
-        receiveThread();
+        if (connectionCallback_) {
+            connectionCallback_(true);
+        }
         
-        // 연결 종료
-        socketInfo_->connect = 0;
-        close(clientSocket);
+        // 별도 스레드에서 클라이언트 처리
+        std::thread clientThread(&SocketComm::clientHandler, this, newClientSocket);
+        clientThread.detach();
+    }
+    
+    LOG_DEBUG("Server thread ended");
+}
+
+void SocketComm::clientHandler(int socket) {
+    receiveMessages(socket);
+    
+    // 연결 종료 처리
+    if (socket == clientSocket_) {
+        connected_ = false;
+        clientSocket_ = -1;
+        
+        if (connectionCallback_) {
+            connectionCallback_(false);
+        }
     }
 }
 
-void SocketComm::receiveThread() {
+void SocketComm::receiveMessages(int socket) {
     char buffer[4096];
     
-    while (running_ && socketInfo_->connect) {
+    while (running_ && connected_) {
         // 메시지 길이 읽기
         uint32_t msgLen;
-        ssize_t ret = recv(socketInfo_->socket, &msgLen, sizeof(msgLen), MSG_WAITALL);
+        ssize_t ret = recv(socket, &msgLen, sizeof(msgLen), MSG_WAITALL);
         if (ret != sizeof(msgLen)) {
             if (ret == 0) {
                 LOG_INFO("Connection closed by peer");
-            } else if (ret < 0 && running_) {
+            } else if (ret < 0) {
                 LOG_ERROR("Failed to receive message length: %s", strerror(errno));
             }
             break;
         }
         
         msgLen = ntohl(msgLen);
-        if (msgLen > sizeof(buffer) - 1) {
-            LOG_ERROR("Message too large: %u bytes", msgLen);
+        if (msgLen == 0 || msgLen > sizeof(buffer) - 1) {
+            LOG_ERROR("Invalid message length: %u", msgLen);
             break;
         }
         
         // 메시지 읽기
-        ret = recv(socketInfo_->socket, buffer, msgLen, MSG_WAITALL);
+        ret = recv(socket, buffer, msgLen, MSG_WAITALL);
         if (ret != static_cast<ssize_t>(msgLen)) {
-            LOG_ERROR("Failed to receive complete message");
+            LOG_ERROR("Failed to receive complete message (got %zd, expected %u)", 
+                     ret, msgLen);
             break;
         }
         
         buffer[msgLen] = '\0';
         
         // 콜백 호출
-        if (socketInfo_->call_fun) {
-            socketInfo_->call_fun(buffer, msgLen, socketInfo_->data);
+        if (messageCallback_) {
+            messageCallback_(std::string(buffer, msgLen));
         }
     }
     
-    socketInfo_->connect = 0;
-}
-
-void SocketComm::cCallbackWrapper(char* data, int len, void* arg) {
-    SocketComm* self = static_cast<SocketComm*>(arg);
-    if (self && self->callback_) {
-        self->callback_(std::string(data, len));
-    }
+    LOG_DEBUG("Receive loop ended");
 }

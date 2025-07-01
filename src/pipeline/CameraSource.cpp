@@ -155,7 +155,7 @@ bool CameraSource::setupProbes() {
                     static guint64 count[2] = {0, 0};
                     count[self->index_]++;
                     if (count[self->index_] % 30 == 0) {
-                        LOG_INFO("[%s] UDP 수신: %llu 패킷", 
+                        LOG_DEBUG("[%s] UDP 수신: %llu 패킷", 
                                 (self->type_ == CameraType::RGB) ? "RGB" : "THERMAL",
                                 count[self->index_]);
                     }
@@ -931,7 +931,7 @@ bool CameraSource::addProbes() {
             count++;
             time_t now = time(nullptr);
             if (now != last_time) {
-                LOG_INFO("UDP 수신: %llu 패킷/초", count);
+                LOG_DEBUG("UDP 수신: %llu 패킷/초", count);
                 count = 0;
                 last_time = now;
             }
@@ -958,7 +958,7 @@ bool CameraSource::addProbes() {
                     static guint64 count[2] = {0, 0};
                     count[self->index_]++;
                     if (count[self->index_] % 30 == 0) {
-                        LOG_INFO("[Camera %d] Infer 출력: %llu 프레임", 
+                        LOG_DEBUG("[Camera %d] Infer 출력: %llu 프레임", 
                                 self->index_, count[self->index_]);
                     }
                     return GST_PAD_PROBE_OK;
@@ -966,6 +966,188 @@ bool CameraSource::addProbes() {
             gst_object_unref(infer_src);
         }
     }
+    
+    return true;
+}
+
+bool CameraSource::addPeerOutput(const std::string& peerId, int streamPort) {
+    std::lock_guard<std::mutex> lock(peerOutputsMutex_);
+    
+    // 이미 존재하는지 확인
+    if (peerOutputs_.find(peerId) != peerOutputs_.end()) {
+        LOG_WARN("Peer output already exists: %s", peerId.c_str());
+        return false;
+    }
+    
+    if (!elements_.main_tee) {
+        LOG_ERROR("Main tee not available");
+        return false;
+    }
+    
+    // 피어 출력 구조체 생성
+    auto peerOutput = std::make_unique<PeerOutput>();
+    peerOutput->peerId = peerId;
+    peerOutput->port = streamPort;
+    
+    // 요소 이름 생성
+    char queueName[64];
+    char udpsinkName[64];
+    snprintf(queueName, sizeof(queueName), "peer_queue_%d_%s", index_, peerId.c_str());
+    snprintf(udpsinkName, sizeof(udpsinkName), "peer_udpsink_%d_%s", index_, peerId.c_str());
+    
+    // 1. Queue 생성
+    peerOutput->queue = gst_element_factory_make("queue", queueName);
+    if (!peerOutput->queue) {
+        LOG_ERROR("Failed to create queue for peer %s", peerId.c_str());
+        return false;
+    }
+    
+    g_object_set(peerOutput->queue,
+                 "max-size-buffers", 5,
+                 "leaky", 2,  // downstream
+                 nullptr);
+    
+    // 2. UDP Sink 생성
+    peerOutput->udpsink = gst_element_factory_make("udpsink", udpsinkName);
+    if (!peerOutput->udpsink) {
+        LOG_ERROR("Failed to create udpsink for peer %s", peerId.c_str());
+        gst_object_unref(peerOutput->queue);
+        return false;
+    }
+    
+    g_object_set(peerOutput->udpsink,
+                 "host", "127.0.0.1",
+                 "port", streamPort,
+                 "sync", FALSE,
+                 "async", FALSE,
+                 nullptr);
+    
+    // 3. 파이프라인이 PLAYING 상태인 경우 동적 추가
+    GstState state;
+    gst_element_get_state(pipeline_, &state, nullptr, 0);
+    
+    if (state == GST_STATE_PLAYING || state == GST_STATE_PAUSED) {
+        // 요소를 READY 상태로 설정
+        gst_element_set_state(peerOutput->queue, GST_STATE_READY);
+        gst_element_set_state(peerOutput->udpsink, GST_STATE_READY);
+    }
+    
+    // 4. 파이프라인에 추가
+    if (!gst_bin_add(GST_BIN(pipeline_), peerOutput->queue)) {
+        LOG_ERROR("Failed to add queue to pipeline");
+        gst_object_unref(peerOutput->queue);
+        gst_object_unref(peerOutput->udpsink);
+        return false;
+    }
+    
+    if (!gst_bin_add(GST_BIN(pipeline_), peerOutput->udpsink)) {
+        LOG_ERROR("Failed to add udpsink to pipeline");
+        gst_bin_remove(GST_BIN(pipeline_), peerOutput->queue);
+        gst_object_unref(peerOutput->queue);
+        gst_object_unref(peerOutput->udpsink);
+        return false;
+    }
+    
+    // 5. Queue와 UDP Sink 연결
+    if (!gst_element_link(peerOutput->queue, peerOutput->udpsink)) {
+        LOG_ERROR("Failed to link queue to udpsink");
+        gst_bin_remove(GST_BIN(pipeline_), peerOutput->queue);
+        gst_bin_remove(GST_BIN(pipeline_), peerOutput->udpsink);
+        return false;
+    }
+    
+    // 6. Tee에서 새 src pad 요청
+    GstPadTemplate* padTemplate = gst_element_class_get_pad_template(
+        GST_ELEMENT_GET_CLASS(elements_.main_tee), "src_%u");
+    
+    peerOutput->teeSrcPad = gst_element_request_pad(elements_.main_tee, 
+                                                    padTemplate, nullptr, nullptr);
+    if (!peerOutput->teeSrcPad) {
+        LOG_ERROR("Failed to request src pad from tee");
+        gst_bin_remove(GST_BIN(pipeline_), peerOutput->queue);
+        gst_bin_remove(GST_BIN(pipeline_), peerOutput->udpsink);
+        return false;
+    }
+    
+    // 7. Queue의 sink pad 가져오기
+    peerOutput->queueSinkPad = gst_element_get_static_pad(peerOutput->queue, "sink");
+    if (!peerOutput->queueSinkPad) {
+        LOG_ERROR("Failed to get sink pad from queue");
+        gst_element_release_request_pad(elements_.main_tee, peerOutput->teeSrcPad);
+        gst_object_unref(peerOutput->teeSrcPad);
+        gst_bin_remove(GST_BIN(pipeline_), peerOutput->queue);
+        gst_bin_remove(GST_BIN(pipeline_), peerOutput->udpsink);
+        return false;
+    }
+    
+    // 8. 패드 연결
+    GstPadLinkReturn linkRet = gst_pad_link(peerOutput->teeSrcPad, 
+                                           peerOutput->queueSinkPad);
+    if (linkRet != GST_PAD_LINK_OK) {
+        LOG_ERROR("Failed to link tee to queue: %d", linkRet);
+        gst_element_release_request_pad(elements_.main_tee, peerOutput->teeSrcPad);
+        gst_object_unref(peerOutput->teeSrcPad);
+        gst_object_unref(peerOutput->queueSinkPad);
+        gst_bin_remove(GST_BIN(pipeline_), peerOutput->queue);
+        gst_bin_remove(GST_BIN(pipeline_), peerOutput->udpsink);
+        return false;
+    }
+    
+    // 9. 파이프라인이 PLAYING 상태인 경우 요소들도 PLAYING으로
+    if (state == GST_STATE_PLAYING) {
+        gst_element_sync_state_with_parent(peerOutput->queue);
+        gst_element_sync_state_with_parent(peerOutput->udpsink);
+    }
+    
+    // 10. 맵에 저장
+    peerOutputs_[peerId] = std::move(peerOutput);
+    
+    LOG_INFO("Added peer output for camera %d: peer=%s, port=%d",
+             index_, peerId.c_str(), streamPort);
+    
+    return true;
+}
+
+bool CameraSource::removePeerOutput(const std::string& peerId) {
+    std::lock_guard<std::mutex> lock(peerOutputsMutex_);
+    
+    auto it = peerOutputs_.find(peerId);
+    if (it == peerOutputs_.end()) {
+        LOG_WARN("Peer output not found: %s", peerId.c_str());
+        return false;
+    }
+    
+    PeerOutput* peerOutput = it->second.get();
+    
+    // 1. 패드 연결 해제
+    if (peerOutput->teeSrcPad && peerOutput->queueSinkPad) {
+        gst_pad_unlink(peerOutput->teeSrcPad, peerOutput->queueSinkPad);
+    }
+    
+    // 2. 요소들을 NULL 상태로 변경
+    gst_element_set_state(peerOutput->queue, GST_STATE_NULL);
+    gst_element_set_state(peerOutput->udpsink, GST_STATE_NULL);
+    
+    // 3. 파이프라인에서 제거
+    gst_bin_remove(GST_BIN(pipeline_), peerOutput->queue);
+    gst_bin_remove(GST_BIN(pipeline_), peerOutput->udpsink);
+    
+    // 4. Tee에서 request pad 해제
+    if (peerOutput->teeSrcPad) {
+        gst_element_release_request_pad(elements_.main_tee, peerOutput->teeSrcPad);
+        gst_object_unref(peerOutput->teeSrcPad);
+    }
+    
+    // 5. Queue sink pad 해제
+    if (peerOutput->queueSinkPad) {
+        gst_object_unref(peerOutput->queueSinkPad);
+    }
+    
+    // 6. 맵에서 제거
+    peerOutputs_.erase(it);
+    
+    LOG_INFO("Removed peer output for camera %d: peer=%s",
+             index_, peerId.c_str());
     
     return true;
 }

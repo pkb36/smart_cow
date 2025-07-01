@@ -1,6 +1,7 @@
 #include "PeerManager.h"
 #include "WebRTCSenderProcess.h"
 #include "../pipeline/Pipeline.h"
+#include "../pipeline/CameraSource.h"
 #include "../utils/Logger.h"
 #include <json-glib/json-glib.h>
 
@@ -60,6 +61,41 @@ bool PeerManager::addPeer(const std::string& peerId) {
         return false;
     }
     
+    // 각 카메라에 대한 UDP 출력 추가
+    const int DEVICE_COUNT = 2;  // RGB + Thermal
+    bool cameraOutputsAdded = true;
+    
+    for (int camIdx = 0; camIdx < DEVICE_COUNT; camIdx++) {
+        // 각 카메라별 포트 계산
+        int camStreamPort = streamPort + camIdx;
+        
+        // Pipeline을 통해 CameraSource에 접근
+        if (pipeline_) {
+            auto camera = pipeline_->getCamera(camIdx);
+            if (camera) {
+                if (!camera->addPeerOutput(peerId, camStreamPort)) {
+                    LOG_ERROR("Failed to add peer output for camera %d", camIdx);
+                    cameraOutputsAdded = false;
+                    
+                    // 이미 추가된 카메라 출력 제거
+                    for (int i = 0; i < camIdx; i++) {
+                        auto prevCamera = pipeline_->getCamera(i);
+                        if (prevCamera) {
+                            prevCamera->removePeerOutput(peerId);
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    
+    if (!cameraOutputsAdded) {
+        releaseStreamPort(streamPort);
+        releaseCommSocket(commSocket);
+        return false;
+    }
+    
     // WebRTC sender 프로세스 생성
     auto sender = std::make_unique<WebRTCSenderProcess>(peerId, streamPort, commSocket);
     
@@ -69,8 +105,17 @@ bool PeerManager::addPeer(const std::string& peerId) {
     });
     
     // 프로세스 시작
-    if (!sender->start(2, codecName_)) {  // device_count = 2
+    if (!sender->start(DEVICE_COUNT, codecName_)) {
         LOG_ERROR("Failed to start WebRTC sender for peer %s", peerId.c_str());
+        
+        // 카메라 출력 제거
+        for (int camIdx = 0; camIdx < DEVICE_COUNT; camIdx++) {
+            auto camera = pipeline_->getCamera(camIdx);
+            if (camera) {
+                camera->removePeerOutput(peerId);
+            }
+        }
+        
         releaseStreamPort(streamPort);
         releaseCommSocket(commSocket);
         return false;
@@ -93,13 +138,48 @@ bool PeerManager::removePeer(const std::string& peerId) {
         return false;
     }
     
-    // 포트 해제
-    // TODO: WebRTCSenderProcess에서 포트 정보 가져오기
+    // WebRTCSenderProcess 정보 가져오기
+    WebRTCSenderProcess* sender = it->second.get();
     
-    // 프로세스 정지 (소멸자에서 자동으로 처리됨)
+    // 프로세스 정보 로깅
+    LOG_INFO("Removing peer %s (pid=%d, state=%d)", 
+             peerId.c_str(), 
+             sender->getPid(),
+             static_cast<int>(sender->getState()));
+    
+    // 포트 정보 가져오기 (WebRTCSenderProcess에 getter 추가 필요)
+    int streamPort = sender->getStreamPort();
+    int commPort = sender->getCommPort();
+    
+    // 각 카메라에서 피어 출력 제거
+    const int DEVICE_COUNT = 2;
+    for (int camIdx = 0; camIdx < DEVICE_COUNT; camIdx++) {
+        if (pipeline_) {
+            auto camera = pipeline_->getCamera(camIdx);
+            if (camera) {
+                camera->removePeerOutput(peerId);
+            }
+        }
+    }
+    
+    // 명시적으로 stop 호출
+    sender->stop();
+    
+    // 잠시 대기 (프로세스 종료 시간)
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    
+    // 맵에서 제거 (unique_ptr이므로 자동 삭제)
     peers_.erase(it);
     
-    LOG_INFO("Removed peer %s", peerId.c_str());
+    // 포트 해제
+    if (streamPort >= baseStreamPort_) {
+        releaseStreamPort(streamPort);
+    }
+    if (commPort >= commSocketBasePort_) {
+        releaseCommSocket(commPort);
+    }
+    
+    LOG_INFO("Removed peer %s successfully", peerId.c_str());
     return true;
 }
 
@@ -114,14 +194,14 @@ size_t PeerManager::getPeerCount() const {
 }
 
 void PeerManager::handleSignalingMessage(const SignalingClient::Message& message) {
-    LOG_DEBUG("Handling signaling message: type=%s, peer=%s",
+    LOG_INFO("Handling signaling message: type=%s, peer=%s",
               message.type.c_str(), message.peerId.c_str());
     
     if (message.type == "offer") {
         handleOffer(message.peerId, message.data);
     } else if (message.type == "answer") {
         handleAnswer(message.peerId, message.data);
-    } else if (message.type == "ice_candidate") {
+    } else if (message.type == "candidate") {
         // ICE candidate 파싱
         JsonParser* parser = json_parser_new();
         if (json_parser_load_from_data(parser, message.data.c_str(), -1, nullptr)) {
@@ -129,19 +209,20 @@ void PeerManager::handleSignalingMessage(const SignalingClient::Message& message
             JsonObject* obj = json_node_get_object(root);
             
             const gchar* candidate = json_object_get_string_member(obj, "candidate");
-            const gchar* sdpMLineIndex = json_object_get_string_member(obj, "sdpMLineIndex");
+            gint64 sdpMLineIndex = json_object_get_int_member(obj, "sdpMLineIndex");
             
-            if (candidate && sdpMLineIndex) {
-                handleIceCandidate(message.peerId, candidate, sdpMLineIndex);
+            if (candidate) {
+                handleIceCandidate(message.peerId, candidate, std::to_string(sdpMLineIndex));
             }
         }
         g_object_unref(parser);
-    } else if (message.type == "peer_join") {
+    } else if (message.type == "ROOM_PEER_JOINED") {
+        LOG_INFO("Peer %s joined the room", message.peerId.c_str());
         // 새 피어 참가
         if (!hasPeer(message.peerId)) {
             addPeer(message.peerId);
         }
-    } else if (message.type == "peer_leave") {
+    } else if (message.type == "ROOM_PEER_LEFT") {
         // 피어 퇴장
         removePeer(message.peerId);
     }
@@ -166,13 +247,17 @@ void PeerManager::handleOffer(const std::string& peerId, const std::string& sdp)
         return;
     }
     
-    // WebRTC sender 프로세스로 offer 전달
+    // webrtc_sender가 기대하는 형식으로 변환
+    // {"sdp": {"type": "offer", "sdp": "..."}}
     JsonBuilder* builder = json_builder_new();
     json_builder_begin_object(builder);
-    json_builder_set_member_name(builder, "type");
-    json_builder_add_string_value(builder, "offer");
     json_builder_set_member_name(builder, "sdp");
-    json_builder_add_string_value(builder, sdp.c_str());
+    json_builder_begin_object(builder);
+        json_builder_set_member_name(builder, "type");
+        json_builder_add_string_value(builder, "offer");
+        json_builder_set_member_name(builder, "sdp");
+        json_builder_add_string_value(builder, sdp.c_str());
+    json_builder_end_object(builder);
     json_builder_end_object(builder);
     
     JsonGenerator* generator = json_generator_new();
@@ -190,7 +275,6 @@ void PeerManager::handleOffer(const std::string& peerId, const std::string& sdp)
 }
 
 void PeerManager::handleAnswer(const std::string& peerId, const std::string& sdp) {
-    // Offer와 동일한 방식으로 처리
     std::lock_guard<std::mutex> lock(peersMutex_);
     
     auto it = peers_.find(peerId);
@@ -199,12 +283,17 @@ void PeerManager::handleAnswer(const std::string& peerId, const std::string& sdp
         return;
     }
     
+    // webrtc_sender가 기대하는 형식으로 변환
+    // {"sdp": {"type": "answer", "sdp": "..."}}
     JsonBuilder* builder = json_builder_new();
     json_builder_begin_object(builder);
-    json_builder_set_member_name(builder, "type");
-    json_builder_add_string_value(builder, "answer");
     json_builder_set_member_name(builder, "sdp");
-    json_builder_add_string_value(builder, sdp.c_str());
+    json_builder_begin_object(builder);
+        json_builder_set_member_name(builder, "type");
+        json_builder_add_string_value(builder, "answer");
+        json_builder_set_member_name(builder, "sdp");
+        json_builder_add_string_value(builder, sdp.c_str());
+    json_builder_end_object(builder);
     json_builder_end_object(builder);
     
     JsonGenerator* generator = json_generator_new();
@@ -217,11 +306,12 @@ void PeerManager::handleAnswer(const std::string& peerId, const std::string& sdp
     g_free(message);
     g_object_unref(generator);
     g_object_unref(builder);
+    
+    LOG_INFO("Forwarded answer to webrtc_sender for peer %s", peerId.c_str());
 }
 
-void PeerManager::handleIceCandidate(const std::string& peerId, 
-                                    const std::string& candidate,
-                                    const std::string& sdpMLineIndex) {
+void PeerManager::handleIceCandidate(const std::string& peerId, const std::string& candidate, 
+                                   const std::string& sdpMLineIndex) {
     std::lock_guard<std::mutex> lock(peersMutex_);
     
     auto it = peers_.find(peerId);
@@ -230,14 +320,17 @@ void PeerManager::handleIceCandidate(const std::string& peerId,
         return;
     }
     
+    // webrtc_sender가 기대하는 형식으로 변환
+    // {"ice": {"candidate": "...", "sdpMLineIndex": 0}}
     JsonBuilder* builder = json_builder_new();
     json_builder_begin_object(builder);
-    json_builder_set_member_name(builder, "type");
-    json_builder_add_string_value(builder, "ice_candidate");
-    json_builder_set_member_name(builder, "candidate");
-    json_builder_add_string_value(builder, candidate.c_str());
-    json_builder_set_member_name(builder, "sdpMLineIndex");
-    json_builder_add_string_value(builder, sdpMLineIndex.c_str());
+    json_builder_set_member_name(builder, "ice");
+    json_builder_begin_object(builder);
+        json_builder_set_member_name(builder, "candidate");
+        json_builder_add_string_value(builder, candidate.c_str());
+        json_builder_set_member_name(builder, "sdpMLineIndex");
+        json_builder_add_int_value(builder, std::stoi(sdpMLineIndex));
+    json_builder_end_object(builder);
     json_builder_end_object(builder);
     
     JsonGenerator* generator = json_generator_new();
@@ -250,25 +343,28 @@ void PeerManager::handleIceCandidate(const std::string& peerId,
     g_free(message);
     g_object_unref(generator);
     g_object_unref(builder);
+    
+    LOG_DEBUG("Forwarded ICE candidate to webrtc_sender for peer %s", peerId.c_str());
 }
 
+// 포트 할당/해제 함수 구현
 int PeerManager::allocateStreamPort() {
     std::lock_guard<std::mutex> lock(portMutex_);
     
     for (size_t i = 0; i < portAllocated_.size(); i++) {
         if (!portAllocated_[i]) {
             portAllocated_[i] = true;
-            return baseStreamPort_ + i;
+            // 각 피어는 DEVICE_COUNT개의 연속된 포트를 사용
+            return baseStreamPort_ + (i * 2);  // 2 = DEVICE_COUNT
         }
     }
-    
-    return -1;
+    return -1;  // 사용 가능한 포트 없음
 }
 
 void PeerManager::releaseStreamPort(int port) {
     std::lock_guard<std::mutex> lock(portMutex_);
     
-    int index = port - baseStreamPort_;
+    int index = (port - baseStreamPort_) / 2;  // 2 = DEVICE_COUNT
     if (index >= 0 && index < static_cast<int>(portAllocated_.size())) {
         portAllocated_[index] = false;
     }
@@ -283,7 +379,6 @@ int PeerManager::allocateCommSocket() {
             return commSocketBasePort_ + i;
         }
     }
-    
     return -1;
 }
 
@@ -301,47 +396,107 @@ void PeerManager::handlePeerMessage(const std::string& peerId, const std::string
               peerId.c_str(), message.c_str());
     
     // webrtc_sender로부터 받은 메시지를 시그널링 서버로 전달
-    // 메시지 타입에 따라 처리
     JsonParser* parser = json_parser_new();
-    if (json_parser_load_from_data(parser, message.c_str(), -1, nullptr)) {
-        JsonNode* root = json_parser_get_root(parser);
-        JsonObject* obj = json_node_get_object(root);
-        
-        const gchar* type = json_object_get_string_member(obj, "type");
-        
-        if (g_strcmp0(type, "answer") == 0) {
-            // answer를 시그널링 서버로 전달
-            const gchar* sdp = json_object_get_string_member(obj, "sdp");
-            if (sdp && signalingClient_) {
-                signalingClient_->sendToPeer(peerId, "answer", sdp);
+    if (!json_parser_load_from_data(parser, message.c_str(), -1, nullptr)) {
+        LOG_ERROR("Failed to parse JSON message");
+        g_object_unref(parser);
+        return;
+    }
+    
+    JsonNode* root = json_parser_get_root(parser);
+    if (!JSON_NODE_HOLDS_OBJECT(root)) {
+        LOG_ERROR("JSON root is not an object");
+        g_object_unref(parser);
+        return;
+    }
+    
+    JsonObject* obj = json_node_get_object(root);
+    
+    // webrtc_sender의 메시지 형식 확인
+    // 형식: { "peerType": "camera", "action": "...", "message": {...} }
+    
+    const gchar* action = json_object_get_string_member(obj, "action");
+    if (!action) {
+        LOG_ERROR("No action field in message");
+        g_object_unref(parser);
+        return;
+    }
+    
+    // message 필드가 있는지 확인
+    if (!json_object_has_member(obj, "message")) {
+        LOG_ERROR("No message field");
+        g_object_unref(parser);
+        return;
+    }
+    
+    JsonObject* msgObj = json_object_get_object_member(obj, "message");
+    if (!msgObj) {
+        LOG_ERROR("Message field is not an object");
+        g_object_unref(parser);
+        return;
+    }
+    
+    if (g_strcmp0(action, "answer") == 0) {
+        // answer 처리
+        if (json_object_has_member(msgObj, "sdp")) {
+            JsonObject* sdpObj = json_object_get_object_member(msgObj, "sdp");
+            if (sdpObj) {
+                const gchar* sdpType = json_object_get_string_member(sdpObj, "type");
+                const gchar* sdpStr = json_object_get_string_member(sdpObj, "sdp");
+                
+                if (sdpType && sdpStr && signalingClient_) {
+                    signalingClient_->sendToPeer(peerId, "answer", sdpStr);
+                }
             }
-        } else if (g_strcmp0(type, "ice_candidate") == 0) {
-            // ICE candidate를 시그널링 서버로 전달
-            const gchar* candidate = json_object_get_string_member(obj, "candidate");
-            const gchar* sdpMLineIndex = json_object_get_string_member(obj, "sdpMLineIndex");
-            
-            if (candidate && sdpMLineIndex && signalingClient_) {
-                JsonBuilder* builder = json_builder_new();
-                json_builder_begin_object(builder);
-                json_builder_set_member_name(builder, "candidate");
-                json_builder_add_string_value(builder, candidate);
-                json_builder_set_member_name(builder, "sdpMLineIndex");
-                json_builder_add_string_value(builder, sdpMLineIndex);
-                json_builder_end_object(builder);
+        }
+    } 
+    else if (g_strcmp0(action, "candidate") == 0) {
+        // ICE candidate 처리
+        if (json_object_has_member(msgObj, "ice")) {
+            JsonObject* iceObj = json_object_get_object_member(msgObj, "ice");
+            if (iceObj) {
+                const gchar* candidate = json_object_get_string_member(iceObj, "candidate");
+                gint64 sdpMLineIndex = json_object_get_int_member(iceObj, "sdpMLineIndex");
                 
-                JsonGenerator* gen = json_generator_new();
-                JsonNode* node = json_builder_get_root(builder);
-                json_generator_set_root(gen, node);
-                
-                gchar* data = json_generator_to_data(gen, nullptr);
-                signalingClient_->sendToPeer(peerId, "ice_candidate", data);
-                
-                g_free(data);
-                g_object_unref(gen);
-                g_object_unref(builder);
+                if (candidate && signalingClient_) {
+                    // ICE candidate를 시그널링 서버로 전달
+                    JsonBuilder* builder = json_builder_new();
+                    json_builder_begin_object(builder);
+                    json_builder_set_member_name(builder, "candidate");
+                    json_builder_add_string_value(builder, candidate);
+                    json_builder_set_member_name(builder, "sdpMLineIndex");
+                    json_builder_add_int_value(builder, sdpMLineIndex);
+                    json_builder_end_object(builder);
+                    
+                    JsonGenerator* gen = json_generator_new();
+                    JsonNode* node = json_builder_get_root(builder);
+                    json_generator_set_root(gen, node);
+                    
+                    gchar* data = json_generator_to_data(gen, nullptr);
+                    signalingClient_->sendToPeer(peerId, "ice_candidate", data);
+                    
+                    g_free(data);
+                    g_object_unref(gen);
+                    g_object_unref(builder);
+                }
             }
         }
     }
+    else if (g_strcmp0(action, "offer") == 0) {
+        // offer 처리 (필요한 경우)
+        if (json_object_has_member(msgObj, "sdp")) {
+            JsonObject* sdpObj = json_object_get_object_member(msgObj, "sdp");
+            if (sdpObj) {
+                const gchar* sdpType = json_object_get_string_member(sdpObj, "type");
+                const gchar* sdpStr = json_object_get_string_member(sdpObj, "sdp");
+                
+                if (sdpType && sdpStr && signalingClient_) {
+                    signalingClient_->sendToPeer(peerId, "offer", sdpStr);
+                }
+            }
+        }
+    }
+    
     g_object_unref(parser);
 }
 

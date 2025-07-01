@@ -5,15 +5,7 @@
 #include <functional>
 #include <thread>
 #include <atomic>
-
-// 기존 C 코드의 SOCKETINFO 구조체를 래핑
-typedef struct _SOCKETINFO {
-    int socket;
-    int port;
-    int connect;
-    void (*call_fun)(char* data, int len, void* arg);
-    void* data;
-} SOCKETINFO;
+#include <mutex>
 
 class SocketComm {
 public:
@@ -23,6 +15,7 @@ public:
     };
     
     using MessageCallback = std::function<void(const std::string&)>;
+    using ConnectionCallback = std::function<void(bool connected)>;
     
     SocketComm(Type type, int port);
     ~SocketComm();
@@ -36,22 +29,33 @@ public:
     // 공통
     bool sendMessage(const std::string& message);
     void setMessageCallback(MessageCallback callback);
-    void Close();
+    void setConnectionCallback(ConnectionCallback callback);
+    void close();
     bool isConnected() const;
     
 private:
     void serverThread();
-    void receiveThread();
-    static void cCallbackWrapper(char* data, int len, void* arg);
+    void clientHandler(int clientSocket);
+    void receiveMessages(int socket);
     
 private:
     Type type_;
     int port_;
-    SOCKETINFO* socketInfo_;
     
-    std::thread thread_;
+    // 서버용
+    int listenSocket_;
+    std::thread serverThread_;
+    
+    // 클라이언트용
+    int clientSocket_;
+    std::thread receiveThread_;
+    
+    // 공통
     std::atomic<bool> running_;
-    MessageCallback callback_;
+    std::atomic<bool> connected_;
+    MessageCallback messageCallback_;
+    ConnectionCallback connectionCallback_;
+    std::mutex sendMutex_;
 };
 
 #endif // SOCKET_COMM_H

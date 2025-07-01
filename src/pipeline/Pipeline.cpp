@@ -185,13 +185,6 @@ GstState Pipeline::getState() const {
     return state;
 }
 
-CameraSource* Pipeline::getCamera(int index) const {
-    if (index >= 0 && index < static_cast<int>(cameras_.size())) {
-        return cameras_[index].get();
-    }
-    return nullptr;
-}
-
 void Pipeline::handleBusMessage(GstMessage* message) {
     switch (GST_MESSAGE_TYPE(message)) {
         case GST_MESSAGE_ERROR: {

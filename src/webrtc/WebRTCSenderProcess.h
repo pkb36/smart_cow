@@ -7,6 +7,7 @@
 #include <atomic>
 #include <functional>
 #include <sys/types.h>
+#include "../utils/SocketCommUDP.h" 
 
 // Forward declarations
 typedef struct _SOCKETINFO SOCKETINFO;
@@ -40,19 +41,19 @@ public:
     void setMessageCallback(MessageCallback callback);
     
     const std::string& getPeerId() const { return peerId_; }
+    int getStreamPort() const { return streamPort_; }
+    int getCommPort() const { return commSocketPort_; }
     
-private:
-    void socketListenerThread();
-    static void socketMessageCallback(char* data, int len, void* arg);
+public:
+    int streamPort_;
+    int commSocketPort_;
     
 private:
     std::string peerId_;
-    int streamPort_;
-    int commSocketPort_;
     State state_;
     
     pid_t childPid_;
-    SOCKETINFO* socket_;
+    std::unique_ptr<SocketCommUDP> socketComm_;
     
     std::thread listenerThread_;
     std::atomic<bool> running_;

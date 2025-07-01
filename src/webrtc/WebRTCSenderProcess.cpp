@@ -1,5 +1,5 @@
 #include "WebRTCSenderProcess.h"
-#include "../utils/SocketComm.h"
+#include "../utils/SocketCommUDP.h"
 #include "../utils/ProcessManager.h"
 #include "../utils/Logger.h"
 #include <sstream>
@@ -8,6 +8,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <cstring>
+#include <csignal>
 
 extern "C" {
     SOCKETINFO* init_socket_comm_server(int port);
@@ -21,7 +22,7 @@ WebRTCSenderProcess::WebRTCSenderProcess(const std::string& peerId,
     , commSocketPort_(commSocketPort)
     , state_(State::NEW)
     , childPid_(-1)
-    , socket_(nullptr)
+    , socketComm_(nullptr)
     , running_(false) {
     
     LOG_INFO("WebRTCSenderProcess created: peer=%s, stream_port=%d, comm_port=%d",
@@ -29,7 +30,30 @@ WebRTCSenderProcess::WebRTCSenderProcess(const std::string& peerId,
 }
 
 WebRTCSenderProcess::~WebRTCSenderProcess() {
-    stop();
+    LOG_INFO("WebRTCSenderProcess destructor called for peer %s", peerId_.c_str());
+    
+    // stop이 아직 호출되지 않았다면 호출
+    if (state_ != State::STOPPED) {
+        stop();
+    }
+    
+    // 프로세스가 여전히 실행 중인지 확인
+    if (childPid_ > 0) {
+        // kill 시그널 전송
+        if (kill(childPid_, 0) == 0) {
+            LOG_WARN("Process %d still running, sending SIGTERM", childPid_);
+            kill(childPid_, SIGTERM);
+            
+            // 잠시 대기
+            usleep(100000);  // 100ms
+            
+            // 여전히 살아있으면 SIGKILL
+            if (kill(childPid_, 0) == 0) {
+                LOG_WARN("Process %d still running, sending SIGKILL", childPid_);
+                kill(childPid_, SIGKILL);
+            }
+        }
+    }
 }
 
 bool WebRTCSenderProcess::start(int deviceCount, const std::string& codecName) {
@@ -39,14 +63,33 @@ bool WebRTCSenderProcess::start(int deviceCount, const std::string& codecName) {
     }
     
     state_ = State::STARTING;
+
+    // 소켓 서버 시작 (webrtc_sender와 통신용)
+    socketComm_ = std::make_unique<SocketCommUDP>(SocketCommUDP::Type::SERVER, commSocketPort_);
+    socketComm_->setMessageCallback([this](const std::string& message, const struct sockaddr_in& fromAddr) {
+        LOG_DEBUG("Received message from webrtc_sender (%s:%d): %s", 
+                  inet_ntoa(fromAddr.sin_addr), 
+                  ntohs(fromAddr.sin_port),
+                  message.c_str());
+        
+        if (messageCallback_) {
+            messageCallback_(message);
+        }
+    });
+    
+    if (!socketComm_->startServer()) {
+        LOG_ERROR("Failed to start socket server on port %d", commSocketPort_);
+        stop();
+        return false;
+    }
     
     // webrtc_sender 프로세스 실행 명령 구성
     std::ostringstream cmd;
     cmd << "./webrtc_sender"
         << " --peer_id=" << peerId_
-        << " --device_cnt=" << deviceCount
-        << " --stream_port=" << streamPort_
-        << " --comm_port=" << commSocketPort_
+        << " --stream_cnt=" << deviceCount
+        << " --stream_base_port=" << streamPort_
+        << " --comm_socket_port=" << commSocketPort_
         << " --codec_name=" << codecName;
     
     // 프로세스 시작
@@ -60,21 +103,6 @@ bool WebRTCSenderProcess::start(int deviceCount, const std::string& codecName) {
     }
     
     LOG_INFO("Started webrtc_sender process: pid=%d, cmd=%s", childPid_, cmd.str().c_str());
-    
-    // 소켓 서버 시작 (webrtc_sender와 통신용)
-    socket_ = init_socket_comm_server(commSocketPort_);
-    if (!socket_) {
-        LOG_ERROR("Failed to create comm socket on port %d", commSocketPort_);
-        stop();
-        return false;
-    }
-    
-    socket_->call_fun = &WebRTCSenderProcess::socketMessageCallback;
-    socket_->data = this;
-    
-    // 리스너 스레드 시작
-    running_ = true;
-    listenerThread_ = std::thread(&WebRTCSenderProcess::socketListenerThread, this);
     
     state_ = State::RUNNING;
     
@@ -95,10 +123,7 @@ void WebRTCSenderProcess::stop() {
     }
     
     // 소켓 닫기
-    if (socket_) {
-        close_socket_comm(socket_);
-        socket_ = nullptr;
-    }
+    socketComm_.reset();
     
     // 프로세스 종료
     if (childPid_ > 0) {
@@ -129,106 +154,13 @@ bool WebRTCSenderProcess::isRunning() const {
 }
 
 bool WebRTCSenderProcess::sendMessage(const std::string& message) {
-    if (!socket_ || !socket_->connect) {
+    if (!socketComm_ || !socketComm_->isConnected()) {
         LOG_ERROR("Socket not connected for peer %s", peerId_.c_str());
         return false;
     }
-    
-    // 메시지 길이 + 메시지 전송
-    uint32_t msgLen = message.length();
-    uint32_t netLen = htonl(msgLen);
-    
-    if (send(socket_->socket, &netLen, sizeof(netLen), 0) != sizeof(netLen)) {
-        LOG_ERROR("Failed to send message length");
-        return false;
-    }
-    
-    if (send(socket_->socket, message.c_str(), msgLen, 0) != static_cast<ssize_t>(msgLen)) {
-        LOG_ERROR("Failed to send message");
-        return false;
-    }
-    
-    LOG_DEBUG("Sent message to webrtc_sender: %s", message.c_str());
-    return true;
+    return socketComm_->sendMessage(message);
 }
 
 void WebRTCSenderProcess::setMessageCallback(MessageCallback callback) {
     messageCallback_ = callback;
-}
-
-void WebRTCSenderProcess::socketListenerThread() {
-    LOG_DEBUG("Socket listener thread started for peer %s", peerId_.c_str());
-    
-    while (running_) {
-        // Accept 연결
-        struct sockaddr_in clientAddr;
-        socklen_t clientLen = sizeof(clientAddr);
-        
-        int clientSocket = accept(socket_->socket, (struct sockaddr*)&clientAddr, &clientLen);
-        if (clientSocket < 0) {
-            if (running_ && errno != EINTR) {
-                LOG_ERROR("Accept failed: %s", strerror(errno));
-            }
-            continue;
-        }
-        
-        LOG_INFO("webrtc_sender connected on comm socket");
-        
-        // 기존 연결 닫기
-        if (socket_->connect) {
-            close(socket_->socket);
-        }
-        
-        socket_->socket = clientSocket;
-        socket_->connect = 1;
-        
-        // 메시지 수신 루프
-        char buffer[4096];
-        while (running_ && socket_->connect) {
-            // 메시지 길이 읽기
-            uint32_t msgLen;
-            ssize_t ret = recv(clientSocket, &msgLen, sizeof(msgLen), MSG_WAITALL);
-            if (ret != sizeof(msgLen)) {
-                if (ret == 0) {
-                    LOG_INFO("webrtc_sender disconnected");
-                } else if (ret < 0 && running_) {
-                    LOG_ERROR("Failed to receive message length: %s", strerror(errno));
-                }
-                break;
-            }
-            
-            msgLen = ntohl(msgLen);
-            if (msgLen > sizeof(buffer) - 1) {
-                LOG_ERROR("Message too large: %u bytes", msgLen);
-                break;
-            }
-            
-            // 메시지 읽기
-            ret = recv(clientSocket, buffer, msgLen, MSG_WAITALL);
-            if (ret != static_cast<ssize_t>(msgLen)) {
-                LOG_ERROR("Failed to receive complete message");
-                break;
-            }
-            
-            buffer[msgLen] = '\0';
-            
-            // 콜백 호출
-            if (socket_->call_fun) {
-                socket_->call_fun(buffer, msgLen, socket_->data);
-            }
-        }
-        
-        socket_->connect = 0;
-        close(clientSocket);
-    }
-    
-    LOG_DEBUG("Socket listener thread ended for peer %s", peerId_.c_str());
-}
-
-void WebRTCSenderProcess::socketMessageCallback(char* data, int len, void* arg) {
-    WebRTCSenderProcess* self = static_cast<WebRTCSenderProcess*>(arg);
-    
-    if (self->messageCallback_) {
-        self->messageCallback_(std::string(data, len));
-    }
 }
