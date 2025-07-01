@@ -149,18 +149,64 @@ void SocketCommUDP::setMessageCallback(MessageCallback callback) {
 }
 
 void SocketCommUDP::close() {
+    LOG_DEBUG("SocketCommUDP::close() called");
+    
+    // 1. 먼저 running_ 플래그 설정
     running_ = false;
     
+    // 2. 소켓을 즉시 닫아서 recvfrom을 중단시킴
     if (socket_ >= 0) {
-        // EXIT 메시지 전송 (호환성)
-        sendMessage("EXIT");
+        LOG_DEBUG("Shutting down socket %d", socket_);
+        
+        // shutdown으로 읽기 중단 (EXIT 메시지 전송 전에!)
+        shutdown(socket_, SHUT_RD);
+        
+        // EXIT 메시지 전송 시도 (실패해도 무시)
+        try {
+            if ((type_ == Type::SERVER && hasClient_) || type_ == Type::CLIENT) {
+                sendMessage("EXIT");
+            }
+        } catch (...) {
+            LOG_DEBUG("Failed to send EXIT message, ignoring");
+        }
+        
+        // 소켓 완전히 닫기
+        shutdown(socket_, SHUT_RDWR);
         ::close(socket_);
         socket_ = -1;
     }
     
+    // 3. 수신 스레드 종료 대기 (타임아웃 포함)
     if (receiveThread_.joinable()) {
-        receiveThread_.join();
+        LOG_DEBUG("Waiting for receive thread to finish...");
+        
+        // C++11 방식의 타임아웃
+        auto start = std::chrono::steady_clock::now();
+        while (receiveThread_.joinable()) {
+            if (std::chrono::steady_clock::now() - start > std::chrono::seconds(2)) {
+                LOG_ERROR("Receive thread join timeout!");
+                // detach하고 포기
+                receiveThread_.detach();
+                break;
+            }
+            
+            // joinable 상태 확인
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            
+            // join 시도
+            if (receiveThread_.joinable()) {
+                try {
+                    receiveThread_.join();
+                    LOG_DEBUG("Receive thread joined successfully");
+                    break;
+                } catch (...) {
+                    // join 실패 시 계속 시도
+                }
+            }
+        }
     }
+    
+    LOG_DEBUG("SocketCommUDP::close() completed");
 }
 
 void SocketCommUDP::receiveThread() {
@@ -170,19 +216,62 @@ void SocketCommUDP::receiveThread() {
     
     LOG_DEBUG("UDP receive thread started");
     
-    while (running_) {
+    while (running_ && socket_ >= 0) {  // socket_ 체크 추가
         fromLen = sizeof(fromAddr);
+        
+        // select 사용하여 타임아웃 설정
+        fd_set readfds;
+        FD_ZERO(&readfds);
+        FD_SET(socket_, &readfds);
+        
+        struct timeval tv;
+        tv.tv_sec = 0;
+        tv.tv_usec = 500000;  // 500ms
+        
+        int ret = select(socket_ + 1, &readfds, NULL, NULL, &tv);
+        
+        if (ret < 0) {
+            if (errno == EBADF) {  // 소켓이 닫힘
+                LOG_DEBUG("Socket closed, exiting receive thread");
+                break;
+            }
+            if (errno != EINTR) {
+                LOG_ERROR("select error: %s", strerror(errno));
+                break;
+            }
+            continue;
+        } else if (ret == 0) {
+            // 타임아웃 - running_ 체크
+            continue;
+        }
+        
+        // 소켓이 닫혔는지 재확인
+        if (socket_ < 0) {
+            LOG_DEBUG("Socket closed during select, exiting");
+            break;
+        }
+        
         ssize_t recvLen = recvfrom(socket_, buffer, sizeof(buffer) - 1, 0,
                                   (struct sockaddr*)&fromAddr, &fromLen);
         
         if (recvLen < 0) {
-            if (running_ && errno != EINTR) {
+            if (errno == EBADF || errno == ENOTCONN) {
+                LOG_DEBUG("Socket error, exiting receive thread");
+                break;
+            }
+            if (running_ && errno != EINTR && errno != EAGAIN) {
                 LOG_ERROR("recvfrom failed: %s", strerror(errno));
             }
             continue;
         }
         
+        if (recvLen == 0) {
+            LOG_DEBUG("Received 0 bytes, connection closed?");
+            continue;
+        }
+        
         buffer[recvLen] = '\0';
+        
         LOG_DEBUG("Received %zd bytes from %s:%d: %s", 
                  recvLen, inet_ntoa(fromAddr.sin_addr), ntohs(fromAddr.sin_port), buffer);
         

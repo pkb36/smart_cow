@@ -22,7 +22,7 @@ public:
     void setSignalingClient(SignalingClient* client) { signalingClient_ = client; }
     
     // Peer 관리
-    bool addPeer(const std::string& peerId);
+    bool addPeer(const std::string& peerId, CameraType source = CameraType::RGB);
     bool removePeer(const std::string& peerId);
     bool hasPeer(const std::string& peerId) const;
     size_t getPeerCount() const;

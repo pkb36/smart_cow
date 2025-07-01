@@ -55,7 +55,6 @@ private:
     pid_t childPid_;
     std::unique_ptr<SocketCommUDP> socketComm_;
     
-    std::thread listenerThread_;
     std::atomic<bool> running_;
     MessageCallback messageCallback_;
 };

@@ -87,7 +87,7 @@ bool WebRTCSenderProcess::start(int deviceCount, const std::string& codecName) {
     std::ostringstream cmd;
     cmd << "./webrtc_sender"
         << " --peer_id=" << peerId_
-        << " --stream_cnt=" << deviceCount
+        << " --stream_cnt=" << 1
         << " --stream_base_port=" << streamPort_
         << " --comm_socket_port=" << commSocketPort_
         << " --codec_name=" << codecName;
@@ -116,11 +116,6 @@ void WebRTCSenderProcess::stop() {
     
     state_ = State::STOPPING;
     running_ = false;
-    
-    // 리스너 스레드 종료
-    if (listenerThread_.joinable()) {
-        listenerThread_.join();
-    }
     
     // 소켓 닫기
     socketComm_.reset();

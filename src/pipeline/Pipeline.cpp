@@ -102,10 +102,10 @@ bool Pipeline::start() {
                     gst_element_get_state(element, &state, &pending, 0);
                     
                     const gchar* name = gst_element_get_name(element);
-                    LOG_INFO("요소: %s, 상태: %s, 대기: %s",
-                            name,
-                            gst_element_state_get_name(state),
-                            gst_element_state_get_name(pending));
+                    // LOG_INFO("요소: %s, 상태: %s, 대기: %s",
+                    //         name,
+                    //         gst_element_state_get_name(state),
+                    //         gst_element_state_get_name(pending));
                     
                     g_value_reset(&item);
                     break;
@@ -275,6 +275,14 @@ bool Pipeline::setupCameras(const Config& config) {
     
     for (int i = 0; i < deviceCount; i++) {
         const CameraConfig& camConfig = config.getCameraConfig(i);
+
+        LOG_INFO("=== Camera Setup ===");
+        LOG_INFO("Index: %d", i);
+        LOG_INFO("Type: %s", (camConfig.type == CameraType::RGB) ? "RGB" : "THERMAL");
+        LOG_INFO("Source Port: %d", camConfig.source.port);
+        LOG_INFO("Output Port: %d", 5000 + i);
+        LOG_INFO("Bitrate: %d", camConfig.encoder.bitrate);
+        LOG_INFO("==================");
         
         auto camera = std::make_unique<CameraSource>(camConfig.type, i);
         

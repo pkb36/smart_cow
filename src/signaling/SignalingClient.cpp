@@ -43,13 +43,19 @@ bool SignalingClient::connect() {
     
     state_ = ConnectionState::CONNECTING;
     
+    SoupLogger *logger;
+    const char *https_aliases[] = {"wss", NULL};
     // Soup 세션 생성
     if (!session_) {
         session_ = soup_session_new_with_options(
             SOUP_SESSION_SSL_STRICT, FALSE,
             SOUP_SESSION_SSL_USE_SYSTEM_CA_FILE, TRUE,
-            nullptr);
+            SOUP_SESSION_HTTPS_ALIASES, https_aliases,nullptr);
     }
+
+    logger = soup_logger_new(SOUP_LOGGER_LOG_BODY, -1);
+    soup_session_add_feature(session_, SOUP_SESSION_FEATURE(logger));
+    g_object_unref(logger);
     
     // WebSocket 연결 메시지 생성
     SoupMessage* msg = soup_message_new(SOUP_METHOD_GET, serverUrl_.c_str());
@@ -178,7 +184,7 @@ bool SignalingClient::sendToPeer(const std::string& peerId, const std::string& t
         json_builder_add_string_value(builder, data.c_str());
         json_builder_end_object(builder);
         
-    } else if (g_strcmp0(type.c_str(), "ice_candidate") == 0) {
+    } else if (g_strcmp0(type.c_str(), "candidate") == 0) {
         // ICE candidate인 경우 - data는 이미 JSON 문자열
         JsonParser* parser = json_parser_new();
         GError* error = nullptr;
@@ -489,6 +495,9 @@ void SignalingClient::onError(SoupWebsocketConnection* conn, GError* error,
 }
 
 void SignalingClient::handleMessage(const std::string& message) {
+    // LOG_INFO("=== RAW WebSocket Message ===");
+    // LOG_INFO("%s", message.c_str());
+    // LOG_INFO("=============================");
     // JSON 파싱
     JsonParser* parser = json_parser_new();
     GError* error = nullptr;

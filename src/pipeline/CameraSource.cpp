@@ -931,7 +931,8 @@ bool CameraSource::addProbes() {
             count++;
             time_t now = time(nullptr);
             if (now != last_time) {
-                LOG_DEBUG("UDP 수신: %llu 패킷/초", count);
+                CameraSource* self = static_cast<CameraSource*>(data);
+                // LOG_INFO("[%s]UDP 수신: %llu 패킷/초", (self->type_ == CameraType::RGB) ? "RGB" : "THERMAL", count);
                 count = 0;
                 last_time = now;
             }
@@ -958,12 +959,98 @@ bool CameraSource::addProbes() {
                     static guint64 count[2] = {0, 0};
                     count[self->index_]++;
                     if (count[self->index_] % 30 == 0) {
-                        LOG_DEBUG("[Camera %d] Infer 출력: %llu 프레임", 
-                                self->index_, count[self->index_]);
+                        // LOG_INFO("[Camera %d] Infer 출력: %llu 프레임", 
+                        //         self->index_, count[self->index_]);
                     }
                     return GST_PAD_PROBE_OK;
                 }, this, nullptr);
             gst_object_unref(infer_src);
+        }
+    }
+
+    if (elements_.main_tee) {
+        GstPad* pad = gst_element_get_static_pad(elements_.main_tee, "src_0");
+        if (!pad) {
+            GstIterator* it = gst_element_iterate_src_pads(elements_.main_tee);
+            GValue item = G_VALUE_INIT;
+            if (gst_iterator_next(it, &item) == GST_ITERATOR_OK) {
+                pad = GST_PAD(g_value_get_object(&item));
+                gst_object_ref(pad);
+                g_value_reset(&item);
+            }
+            gst_iterator_free(it);
+        }
+        
+        if (pad) {
+            gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BUFFER,
+                [](GstPad* pad, GstPadProbeInfo* info, gpointer data) -> GstPadProbeReturn {
+                    CameraSource* self = static_cast<CameraSource*>(data);
+                    static int counter[2] = {0, 0};
+                    static bool caps_printed[2] = {false, false};
+                    
+                    counter[self->index_]++;
+                    
+                    // 처음 한 번만 Caps 정보 출력
+                    if (!caps_printed[self->index_]) {
+                        GstCaps* caps = gst_pad_get_current_caps(pad);
+                        if (caps) {
+                            gchar* caps_str = gst_caps_to_string(caps);
+                            LOG_INFO("=== Camera %d (%s) Caps ===", 
+                                    self->index_,
+                                    (self->type_ == CameraType::RGB) ? "RGB" : "THERMAL");
+                            LOG_INFO("%s", caps_str);
+                            
+                            // 구조체에서 상세 정보 추출
+                            GstStructure* structure = gst_caps_get_structure(caps, 0);
+                            if (structure) {
+                                const gchar* format = gst_structure_get_string(structure, "format");
+                                gint width, height;
+                                gint fps_n, fps_d;
+                                
+                                if (gst_structure_get_int(structure, "width", &width) &&
+                                    gst_structure_get_int(structure, "height", &height)) {
+                                    LOG_INFO("Resolution: %dx%d", width, height);
+                                }
+                                
+                                if (gst_structure_get_fraction(structure, "framerate", &fps_n, &fps_d)) {
+                                    LOG_INFO("Framerate: %d/%d = %.2f fps", fps_n, fps_d, 
+                                            (float)fps_n / fps_d);
+                                }
+                                
+                                if (format) {
+                                    LOG_INFO("Format: %s", format);
+                                }
+                                
+                                // 이미지 크기가 예상과 맞는지 확인
+                                if (self->type_ == CameraType::RGB) {
+                                    if (width != 1920 || height != 1080) {
+                                        LOG_WARN("RGB camera unexpected resolution: %dx%d (expected 1920x1080)", 
+                                                width, height);
+                                    }
+                                } else {  // THERMAL
+                                    if (width != 384 || height != 288) {
+                                        LOG_WARN("Thermal camera unexpected resolution: %dx%d (expected 384x288)", 
+                                                width, height);
+                                    }
+                                }
+                            }
+                            LOG_INFO("========================");
+                            
+                            g_free(caps_str);
+                            gst_caps_unref(caps);
+                            caps_printed[self->index_] = true;
+                        }
+                    }
+                    
+                    // 30프레임마다 카운트 출력
+                    // if (counter[self->index_] % 30 == 0) {
+                    //     LOG_INFO("main_tee_%d output: %d frames", 
+                    //             self->index_, counter[self->index_]);
+                    // }
+                    
+                    return GST_PAD_PROBE_OK;
+                }, this, nullptr);
+            gst_object_unref(pad);
         }
     }
     
@@ -982,6 +1069,10 @@ bool CameraSource::addPeerOutput(const std::string& peerId, int streamPort) {
     if (!elements_.main_tee) {
         LOG_ERROR("Main tee not available");
         return false;
+    }
+    else
+    {
+        LOG_INFO("Main tee name: %s", GST_OBJECT_NAME(elements_.main_tee));
     }
     
     // 피어 출력 구조체 생성
@@ -1150,4 +1241,125 @@ bool CameraSource::removePeerOutput(const std::string& peerId) {
              index_, peerId.c_str());
     
     return true;
+}
+
+void CameraSource::saveBufferAsImage(GstBuffer* buffer, GstCaps* caps, int frameNumber) {
+    // 파일명 생성
+    char filename[256];
+    snprintf(filename, sizeof(filename),
+             "/home/nvidia/camera_%d_%s_frame_%06d.png",
+             index_,
+             (type_ == CameraType::RGB) ? "rgb" : "thermal",
+             frameNumber);
+    
+    LOG_INFO("Attempting to save image: %s", filename);
+    
+    // GstSample 생성
+    GstSample* sample = gst_sample_new(buffer, caps, nullptr, nullptr);
+    if (!sample) {
+        LOG_ERROR("Failed to create sample");
+        return;
+    }
+    
+    // 변환 파이프라인
+    GError* error = nullptr;
+    GstElement* pipeline = gst_parse_launch(
+        "appsrc name=src ! "
+        "videoconvert ! "
+        "pngenc ! "
+        "filesink name=sink",
+        &error);
+    
+    if (error) {
+        LOG_ERROR("Failed to create pipeline: %s", error->message);
+        g_error_free(error);
+        gst_sample_unref(sample);
+        return;
+    }
+    
+    // 요소 가져오기
+    GstElement* appsrc = gst_bin_get_by_name(GST_BIN(pipeline), "src");
+    GstElement* filesink = gst_bin_get_by_name(GST_BIN(pipeline), "sink");
+    
+    // 설정
+    g_object_set(appsrc, "caps", caps, nullptr);
+    g_object_set(filesink, "location", filename, nullptr);
+    
+    // 파이프라인 시작
+    gst_element_set_state(pipeline, GST_STATE_PLAYING);
+    
+    // 샘플 푸시
+    g_signal_emit_by_name(appsrc, "push-sample", sample);
+    g_signal_emit_by_name(appsrc, "end-of-stream");
+    
+    // 완료 대기
+    GstBus* bus = gst_element_get_bus(pipeline);
+    GstMessage* msg = gst_bus_timed_pop_filtered(bus, 5 * GST_SECOND,
+                                                 (GstMessageType)(GST_MESSAGE_ERROR | GST_MESSAGE_EOS));
+    
+    if (msg) {
+        if (GST_MESSAGE_TYPE(msg) == GST_MESSAGE_EOS) {
+            LOG_INFO("Successfully saved image: %s", filename);
+        } else if (GST_MESSAGE_TYPE(msg) == GST_MESSAGE_ERROR) {
+            gchar* debug;
+            GError* err;
+            gst_message_parse_error(msg, &err, &debug);
+            LOG_ERROR("Error saving image: %s", err->message);
+            g_error_free(err);
+            g_free(debug);
+        }
+        gst_message_unref(msg);
+    }
+    
+    // 정리
+    gst_element_set_state(pipeline, GST_STATE_NULL);
+    gst_object_unref(bus);
+    gst_object_unref(appsrc);
+    gst_object_unref(filesink);
+    gst_object_unref(pipeline);
+    gst_sample_unref(sample);
+}
+
+void CameraSource::convertToJpeg(const char* rawFile, int width, int height, 
+                                GstVideoFormat format, int frameNumber) {
+    // GStreamer를 사용한 JPEG 변환
+    char pipeline_str[1024];
+    char jpeg_filename[256];
+    
+    snprintf(jpeg_filename, sizeof(jpeg_filename),
+             "/home/nvidia/camera_%d_%s_frame_%06d.jpg",
+             index_,
+             (type_ == CameraType::RGB) ? "rgb" : "thermal",
+             frameNumber);
+    
+    const char* format_str = (format == GST_VIDEO_FORMAT_I420) ? "I420" : "NV12";
+    
+    snprintf(pipeline_str, sizeof(pipeline_str),
+             "filesrc location=%s ! "
+             "videoparse width=%d height=%d format=%s ! "
+             "videoconvert ! "
+             "jpegenc ! "
+             "filesink location=%s",
+             rawFile, width, height, format_str, jpeg_filename);
+    
+    GstElement* pipeline = gst_parse_launch(pipeline_str, nullptr);
+    if (pipeline) {
+        gst_element_set_state(pipeline, GST_STATE_PLAYING);
+        
+        // 변환 완료 대기
+        GstBus* bus = gst_element_get_bus(pipeline);
+        GstMessage* msg = gst_bus_timed_pop_filtered(bus, GST_CLOCK_TIME_NONE,
+                                                     (GstMessageType)(GST_MESSAGE_ERROR | GST_MESSAGE_EOS));
+        
+        if (msg) {
+            if (GST_MESSAGE_TYPE(msg) == GST_MESSAGE_EOS) {
+                LOG_INFO("Converted to JPEG: %s", jpeg_filename);
+            }
+            gst_message_unref(msg);
+        }
+        
+        gst_object_unref(bus);
+        gst_element_set_state(pipeline, GST_STATE_NULL);
+        gst_object_unref(pipeline);
+    }
 }

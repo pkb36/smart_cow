@@ -48,7 +48,8 @@ private:
     bool linkInternalElements();
     bool setupProbes();
     BboxColor determineObjectColor(NvDsObjectMeta* objMeta);
-    
+    void saveBufferAsImage(GstBuffer* buffer, GstCaps* caps, int frameNumber);
+    void convertToJpeg(const char* rawFile, int width, int height, GstVideoFormat format, int frameNumber);
 private:
     CameraType type_;
     int index_;
