@@ -396,7 +396,7 @@ void SignalingClient::sendCameraStatus()
     // WebSocket으로 직접 전송
     soup_websocket_connection_send_text(connection_, message);
     
-    LOG_INFO("Camera Status sent: %s", message);
+    LOG_DEBUG("Camera Status sent: %s", message);
     
     g_free(message);
     g_object_unref(generator);

@@ -2,6 +2,7 @@
 #include "../utils/Logger.h"
 #include "../utils/DeviceSetting.h"
 #include <gstnvdsmeta.h>
+#include <nvdsinfer.h>
 #include <chrono>
 #include <fstream>
 #include <cmath>
@@ -76,7 +77,7 @@ void Detector::processBatchMeta(NvDsBatchMeta* batchMeta, uint32_t frameNumber) 
             DetectedObject obj = convertToDetectedObject(objMeta);
             
             // 필터링 (신뢰도 임계값)
-            if (obj.confidence > 0.3) {  // 기본 임계값
+            if (obj.confidence > 0.3) {
                 detection.objects.push_back(obj);
             }
         }

@@ -7,10 +7,19 @@
 #include <gstnvdsmeta.h>
 #include <unordered_map>
 #include <mutex>
-
+#include <nvdsmeta.h>
 #include "../common/Types.h"
+#include "../detection/Detector.h"
 
 class DetectionBuffer;
+
+struct InferenceStats {
+    uint32_t frameCount = 0;
+    double totalTime = 0.0;
+    double minTime = std::numeric_limits<double>::max();
+    double maxTime = 0.0;
+    std::chrono::high_resolution_clock::time_point lastTime;
+};
 
 class CameraSource {
 public:
@@ -41,7 +50,6 @@ public:
     bool addPeerOutput(const std::string& peerId, int streamPort);
     bool removePeerOutput(const std::string& peerId);
     GstElement* getMainTee() const { return elements_.main_tee; }
-
 private:
     bool parseAndCreateSource(const std::string& sourceStr);
     bool addElementsToPipeline(GstElement* pipeline);
@@ -50,10 +58,13 @@ private:
     BboxColor determineObjectColor(NvDsObjectMeta* objMeta);
     void saveBufferAsImage(GstBuffer* buffer, GstCaps* caps, int frameNumber);
     void convertToJpeg(const char* rawFile, int width, int height, GstVideoFormat format, int frameNumber);
+    void handleDetectionEvent(const DetectionData& detection);
 private:
     CameraType type_;
     int index_;
     GstElement* pipeline_; 
+    std::unique_ptr<Detector> detector_;
+    std::unique_ptr<InferenceStats> inferStats_;
     
     // GStreamer 요소들
     GstElement* source_;
@@ -118,6 +129,9 @@ private:
         std::string peerId;
         int port;
         GstElement* queue;
+        GstElement* encoder_convert;  // 추가
+        GstElement* encoder;          // 추가
+        GstElement* payloader;        // 추가
         GstElement* udpsink;
         GstPad* teeSrcPad;
         GstPad* queueSinkPad;

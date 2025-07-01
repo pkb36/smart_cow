@@ -196,7 +196,7 @@ size_t PeerManager::getPeerCount() const {
 }
 
 void PeerManager::handleSignalingMessage(const SignalingClient::Message& message) {
-    LOG_INFO("Handling signaling message: type=%s, peer=%s",
+    LOG_DEBUG("Handling signaling message: type=%s, peer=%s",
               message.type.c_str(), message.peerId.c_str());
     
     if (message.type == "offer") {

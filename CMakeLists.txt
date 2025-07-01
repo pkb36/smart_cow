@@ -5,6 +5,10 @@ project(WebRTCCamera)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release)
+endif()
+
 add_compile_definitions(_GNU_SOURCE)
 # DeepStream 경로 찾기
 set(DEEPSTREAM_PATH "")
