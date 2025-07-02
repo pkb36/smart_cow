@@ -3,6 +3,8 @@
 #include "../utils/Logger.h"
 #include "../utils/DeviceSetting.h"
 #include <gst/gst.h>
+#include <gst/rtp/gstrtpbuffer.h>
+#include <gst/rtp/rtp.h>
 #include <nvdsmeta.h>
 #include <cmath>
 #include <fstream>
@@ -450,9 +452,8 @@ bool CameraSource::createInferenceChain(const CameraConfig& config) {
         // Queue 속성 설정 (버퍼링 문제일 수 있음)
         g_object_set(elements_.queue2,
                     "max-size-buffers", 30,
-                    "max-size-bytes", 0,
-                    "max-size-time", 0,
-                    "leaky", 2,  // downstream
+                    "max-size-time", 1 * GST_SECOND,
+                    "leaky", 2,
                     nullptr);
         LOG_INFO("Queue2 생성 및 설정 완료");
     }
@@ -462,13 +463,13 @@ bool CameraSource::createInferenceChain(const CameraConfig& config) {
     // Mux
     elements_.mux = gst_element_factory_make("nvstreammux", nullptr);
     g_object_set(elements_.mux,
-                 "batch-size", 1,
-                 "width", config.inference.scale_width,
-                 "height", config.inference.scale_height,
-                 "live-source", 1,
-                 "batched-push-timeout", 40000,   // 40ms (25fps 기준)
-                 "enable-padding", 0,              // 패딩 비활성화
-                 nullptr);
+                    "batch-size", 1,
+                    "width", config.inference.scale_width,
+                    "height", config.inference.scale_height,
+                    "live-source", 1,
+                    "batched-push-timeout", 33000,  // 40000 -> 33000 (30fps 기준)
+                    "enable-padding", 0,
+                    nullptr);
     
     // 추론
     elements_.infer = gst_element_factory_make("nvinfer", nullptr);
@@ -573,9 +574,10 @@ bool CameraSource::createEncoderChain(const CameraConfig& config) {
         
         g_object_set(elements_.sink,
                      "host", "127.0.0.1",
-                     "port", 5000 + index_,
-                     "sync", FALSE,
-                     "async", FALSE,
+                    "port", 5000 + index_,
+                    "sync", FALSE,
+                    "async", FALSE,
+                    "buffer-size", 2097152,  // 2MB 버퍼 추가
                      nullptr);
         
         LOG_INFO("Encoder chain created for camera %d (no inference): codec=%s, bitrate=%d, port=%d",
@@ -742,11 +744,12 @@ bool CameraSource::linkElements(const CameraConfig& config) {
         gst_bin_add(GST_BIN(pipeline_), main_tee);
         
         gst_element_link(elements_.converter4, main_tee);
-        
+
         // ===== 추론된 영상을 위한 인코더 체인 추가 =====
-        char enc_queue_name[32], enc_conv_name[32], enc_name[32], pay_name[32], out_queue_name[32], sink_name[32];
+        char enc_queue_name[32], videorate_name[32], enc_conv_name[32], enc_name[32], pay_name[32], out_queue_name[32], sink_name[32];
         
         snprintf(enc_queue_name, sizeof(enc_queue_name), "infer_enc_queue_%d", index_);
+        snprintf(videorate_name, sizeof(videorate_name), "infer_videorate_%d", index_);
         snprintf(enc_conv_name, sizeof(enc_conv_name), "infer_enc_conv_%d", index_);
         snprintf(enc_name, sizeof(enc_name), "infer_encoder_%d", index_);
         snprintf(pay_name, sizeof(pay_name), "infer_payloader_%d", index_);
@@ -755,6 +758,7 @@ bool CameraSource::linkElements(const CameraConfig& config) {
         
         // 인코더 체인 요소 생성
         GstElement* enc_queue = gst_element_factory_make("queue", enc_queue_name);
+        GstElement* videorate = gst_element_factory_make("videorate", videorate_name);
         GstElement* enc_conv = gst_element_factory_make("nvvideoconvert", enc_conv_name);
         
         const char* encoder_factory = (config.encoder.codec == "h264") ? "nvv4l2h264enc" : "nvv4l2h265enc";
@@ -767,25 +771,37 @@ bool CameraSource::linkElements(const CameraConfig& config) {
         GstElement* udpsink = gst_element_factory_make("udpsink", sink_name);
         
         // 설정
-        g_object_set(enc_queue, "max-size-buffers", 5, "leaky", 2, nullptr);
+        g_object_set(enc_queue, 
+                    "max-size-buffers", 30,           // 5 -> 30
+                    nullptr);
+        g_object_set(videorate,
+                    "max-rate", 10,
+                    nullptr);
+                    
         g_object_set(encoder,
                      "preset-level", 1,
                      "idrinterval", config.encoder.idr_interval,
                      "bitrate", config.encoder.bitrate,
                      "maxperf-enable", TRUE,
                      nullptr);
-        g_object_set(payloader, "pt", 96, "config-interval", 1, nullptr);
-        g_object_set(out_queue, "max-size-buffers", 5, nullptr);
+        g_object_set(payloader, 
+                    "pt", 96, 
+                    "config-interval", 1,
+                    nullptr);
+        g_object_set(out_queue, 
+                    "max-size-buffers", 5,
+                    nullptr);
         g_object_set(udpsink,
                      "host", "127.0.0.1",
-                     "port", 5000 + index_,
-                     "sync", FALSE,
-                     "async", FALSE,
+                    "port", 5000 + index_,
+                    "sync", FALSE,
+                    "async", FALSE,
+                    "buffer-size", 2097152,  // 2MB 버퍼 추가
                      nullptr);
         
         // 파이프라인에 추가
         gst_bin_add_many(GST_BIN(pipeline_),
-                        enc_queue, enc_conv, encoder, payloader, out_queue, udpsink,
+                        enc_queue, videorate, enc_conv, encoder, payloader, out_queue, udpsink,
                         nullptr);
         
         // main_tee -> 인코더 체인 연결
@@ -796,9 +812,58 @@ bool CameraSource::linkElements(const CameraConfig& config) {
         gst_object_unref(enc_queue_sink);
         
         // 인코더 체인 내부 연결
-        gst_element_link_many(enc_queue, enc_conv, encoder, payloader, out_queue, udpsink, nullptr);
-        
+        gst_element_link_many(enc_queue, enc_conv, videorate, encoder, payloader, out_queue, udpsink, nullptr);
         LOG_INFO("추론된 영상 인코더 체인 추가 완료: port=%d", 5000 + index_);
+
+        // Payloader 출력 프로브
+        if (payloader) {
+            GstPad* src_pad = gst_element_get_static_pad(payloader, "src");
+            if (src_pad) {
+                gst_pad_add_probe(src_pad, GST_PAD_PROBE_TYPE_BUFFER,
+                    [](GstPad* pad, GstPadProbeInfo* info, gpointer data) -> GstPadProbeReturn {
+                        CameraSource* self = static_cast<CameraSource*>(data);
+                        GstBuffer* buffer = GST_PAD_PROBE_INFO_BUFFER(info);
+                        
+                        static int rtp_count[2] = {0, 0};
+                        static guint32 last_timestamp[2] = {0, 0};
+                        static guint16 last_seq[2] = {0, 0};
+                        
+                        rtp_count[self->index_]++;
+                        
+                        // RTP 헤더 파싱
+                        GstRTPBuffer rtp = GST_RTP_BUFFER_INIT;
+                        if (gst_rtp_buffer_map(buffer, GST_MAP_READ, &rtp)) {
+                            guint32 timestamp = gst_rtp_buffer_get_timestamp(&rtp);
+                            guint16 seq = gst_rtp_buffer_get_seq(&rtp);
+                            gboolean marker = gst_rtp_buffer_get_marker(&rtp);
+                            guint payload_len = gst_rtp_buffer_get_payload_len(&rtp);
+                            
+                            // 첫 10개와 이후 marker 비트가 설정된 패킷만 로그
+                            if (rtp_count[self->index_] <= 10 || marker) {
+                                LOG_INFO("[%s] RTP_OUT #%d: TS=%u (diff=%d), SEQ=%u (diff=%d), "
+                                        "Marker=%d, PayloadLen=%u, BufferSize=%zu",
+                                        (self->type_ == CameraType::RGB) ? "RGB" : "THERMAL",
+                                        rtp_count[self->index_],
+                                        timestamp,
+                                        timestamp - last_timestamp[self->index_],
+                                        seq,
+                                        seq - last_seq[self->index_],
+                                        marker,
+                                        payload_len,
+                                        gst_buffer_get_size(buffer));
+                            }
+                            
+                            last_timestamp[self->index_] = timestamp;
+                            last_seq[self->index_] = seq;
+                            
+                            gst_rtp_buffer_unmap(&rtp);
+                        }
+                        
+                        return GST_PAD_PROBE_OK;
+                    }, this, nullptr);
+                gst_object_unref(src_pad);
+            }
+        }
         
         // fakesink도 추가 (기존 코드 유지)
         char fakesink_queue_name[32];
@@ -862,6 +927,51 @@ bool CameraSource::addProbes() {
             gst_object_unref(osd_sink_pad);
         }
     }
+
+    // 1. 추론 직후 프레임 로깅 (nvinfer src pad)
+    // if (elements_.infer) {
+    //     GstPad* inferSrcPad = gst_element_get_static_pad(elements_.infer, "src");
+    //     if (inferSrcPad) {
+    //         gst_pad_add_probe(inferSrcPad, GST_PAD_PROBE_TYPE_BUFFER,
+    //             [](GstPad* pad, GstPadProbeInfo* info, gpointer data) -> GstPadProbeReturn {
+    //                 CameraSource* self = static_cast<CameraSource*>(data);
+    //                 static guint64 frameCount[2] = {0, 0};
+                    
+    //                 GstBuffer* buffer = GST_PAD_PROBE_INFO_BUFFER(info);
+    //                 frameCount[self->index_]++;
+                    
+    //                 // 버퍼 정보
+    //                 GstClockTime pts = GST_BUFFER_PTS(buffer);
+    //                 GstClockTime dts = GST_BUFFER_DTS(buffer);
+    //                 GstClockTime duration = GST_BUFFER_DURATION(buffer);
+                    
+    //                 // 메타데이터 확인
+    //                 NvDsBatchMeta* batchMeta = gst_buffer_get_nvds_batch_meta(buffer);
+    //                 int objectCount = 0;
+    //                 uint32_t frameNum = 0;
+                    
+    //                 if (batchMeta && batchMeta->frame_meta_list) {
+    //                     NvDsFrameMeta* frameMeta = (NvDsFrameMeta*)batchMeta->frame_meta_list->data;
+    //                     frameNum = frameMeta->frame_num;
+                        
+    //                     // 객체 수 카운트
+    //                     for (NvDsMetaList* l = frameMeta->obj_meta_list; l != nullptr; l = l->next) {
+    //                         objectCount++;
+    //                     }
+    //                 }
+                    
+    //                 LOG_INFO("[%s] INFER_OUT Frame #%llu (frame_num=%u): PTS=%.3f, Objects=%d",
+    //                          (self->type_ == CameraType::RGB) ? "RGB" : "THERMAL",
+    //                          frameCount[self->index_],
+    //                          frameNum,
+    //                          pts / 1000000000.0,  // 나노초를 초로 변환
+    //                          objectCount);
+                    
+    //                 return GST_PAD_PROBE_OK;
+    //             }, this, nullptr);
+    //         gst_object_unref(inferSrcPad);
+    //     }
+    // }
 
     if (elements_.main_tee) {
         GstPad* pad = gst_element_get_static_pad(elements_.main_tee, "src_0");
@@ -937,11 +1047,16 @@ bool CameraSource::addProbes() {
                         }
                     }
                     
-                    // 30프레임마다 카운트 출력
-                    // if (counter[self->index_] % 30 == 0) {
-                    //     LOG_INFO("main_tee_%d output: %d frames", 
-                    //             self->index_, counter[self->index_]);
-                    // }
+                    
+                    if(self->index_ == 0) {
+                        // RGB 카메라의 경우
+                        // LOG_INFO("main_tee_%d output: %d frames", 
+                        //         self->index_, counter[self->index_]);
+                    } else {
+                        // // Thermal 카메라의 경우
+                        // LOG_INFO("main_tee_%d output: %d frames", 
+                        //         self->index_, counter[self->index_]);
+                    }
                     
                     return GST_PAD_PROBE_OK;
                 }, this, nullptr);
@@ -1050,9 +1165,10 @@ bool CameraSource::addPeerOutput(const std::string& peerId, int streamPort) {
     
     g_object_set(peerOutput->udpsink,
                  "host", "127.0.0.1",
-                 "port", streamPort,
-                 "sync", FALSE,
-                 "async", FALSE,
+                "port", streamPort,
+                "sync", FALSE,
+                "async", FALSE,
+                "buffer-size", 2097152,  // 2MB 버퍼 추가
                  nullptr);
     
     // 6. 파이프라인이 PLAYING 상태인 경우 동적 추가

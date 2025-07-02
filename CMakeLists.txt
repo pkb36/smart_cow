@@ -41,7 +41,7 @@ add_executable(${PROJECT_NAME} ${SOURCES})
 find_package(PkgConfig REQUIRED)
 
 # 필수 라이브러리 찾기
-pkg_search_module(GSTREAMER REQUIRED gstreamer-1.0)
+pkg_search_module(GSTREAMER REQUIRED gstreamer-1.0 gstreamer-rtp-1.0)
 pkg_search_module(GSTREAMER_BASE REQUIRED gstreamer-base-1.0)
 pkg_search_module(GSTREAMER_VIDEO REQUIRED gstreamer-video-1.0)
 pkg_search_module(SOUP REQUIRED libsoup-2.4)
@@ -79,6 +79,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     gstpbutils-1.0
     gstsdp-1.0
     gstwebrtc-1.0
+    gstrtp-1.0
     nvdsgst_meta
     nvds_meta
     nvds_utils
