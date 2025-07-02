@@ -330,3 +330,74 @@ void Pipeline::printBinElements(GstBin* bin, int level) {
     g_value_unset(&item);
     gst_iterator_free(it);
 }
+
+std::string Pipeline::getPipelineString() const {
+    if (!pipeline_) return "";
+    
+    std::ostringstream oss;
+    
+    // 각 카메라별로 파이프라인 문자열 생성
+    for (int i = 0; i < cameras_.size(); i++) {
+        oss << "\n=== Camera " << i << " Pipeline ===\n";
+        
+        // 소스 체인
+        oss << "shmsrc socket-path=/tmp/RGB_Camera.sock" 
+            << " ! ";
+        
+        oss << "nvvideoconvert ! ";
+        oss << "clockoverlay time-format=\"%D %H:%M:%S\" font-desc=\"Arial, 18\" ! ";
+        oss << "videorate ! ";
+        
+        // caps 필터
+        oss << "video/x-raw,width=1920,height=1080,framerate=10/1 ! ";
+        
+        oss << "queue max-size-buffers=5 leaky=downstream ! ";
+        oss << "tee name=tee" << i << " ";
+        
+        // 추론이 활성화된 경우
+        if (config_->getCameraConfig(i).inference.enabled) {
+            oss << "\n\n# Inference branch\n";
+            oss << "tee" << i << ". ! queue ! ";
+            oss << "videoscale ! ";
+            oss << "video/x-raw,width=" << config_->getCameraConfig(i).inference.scale_width 
+                << ",height=" << config_->getCameraConfig(i).inference.scale_height << " ! ";
+            oss << "nvvideoconvert ! ";
+            oss << "nvstreammux batch-size=1 width=" << config_->getCameraConfig(i).inference.scale_width
+                << " height=" << config_->getCameraConfig(i).inference.scale_height 
+                << " live-source=1 ! ";
+            oss << "nvinfer config-file-path=" << config_->getCameraConfig(i).inference.config_file << " ! ";
+            oss << "nvof ! ";
+            oss << "nvvideoconvert ! ";
+            oss << "dspostproc ! ";
+            oss << "nvdsosd ! ";
+            oss << "nvvideoconvert ! ";
+            oss << "tee name=main_tee" << i << " ";
+            
+            // WebRTC 출력
+            oss << "\n\n# WebRTC output\n";
+            oss << "main_tee" << i << ". ! queue ! ";
+            oss << "nvvideoconvert ! ";
+            oss << "capsfilter caps=\"video/x-raw,format=I420";
+            oss << ",width=1920,height=1080";
+            oss << ",framerate=10/1\" ! ";
+            oss << "intervideosink channel=";
+            oss << "Webrtc_RGB_Camera";
+            
+            // Fakesink
+            oss << "\n\n# Fakesink (for pipeline stability)\n";
+            oss << "main_tee" << i << ". ! queue max-size-buffers=1 leaky=downstream ! ";
+            oss << "fakesink sync=false";
+        } else {
+            // 추론 비활성화
+            oss << "\n\n# Direct WebRTC output (no inference)\n";
+            oss << "tee" << i << ". ! queue ! ";
+            oss << "nvvideoconvert ! ";
+            oss << "intervideosink channel=";
+            oss << "Webrtc_RGB_Camera";
+        }
+        
+        oss << "\n";
+    }
+    
+    return oss.str();
+}

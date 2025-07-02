@@ -57,7 +57,8 @@ private:
     // GStreamer 요소들 (구조체로 통합 관리)
     struct Elements {
         // 소스 체인
-        GstElement* intervideosrc;
+        GstElement* shmsrc;
+        GstElement* shm_capsfilter;
         GstElement* converter1;
         GstElement* clockoverlay;
         GstElement* videorate;
@@ -68,7 +69,9 @@ private:
         // 추론 체인 (옵션)
         GstElement* queue2;
         GstElement* videoscale;
+        GstElement* videoscale_capsfilter;
         GstElement* converter2;
+        GstElement* converter2_capsfilter;
         GstElement* mux;
         GstElement* infer;
         GstElement* nvof;

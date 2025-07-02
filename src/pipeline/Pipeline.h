@@ -22,6 +22,7 @@ public:
     void printPipelineElements();
     // 파이프라인 상태
     GstState getState() const;
+    std::string getPipelineString() const;
     
     // 메시지 처리
     void handleBusMessage(GstMessage* message);

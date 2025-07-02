@@ -8,6 +8,7 @@
 #include <nvdsmeta.h>
 #include <cmath>
 #include <fstream>
+#include <map>
 
 CameraSource::CameraSource(CameraType type, int index)
     : type_(type)
@@ -125,12 +126,27 @@ GstPadProbeReturn CameraSource::osdSinkPadProbe(GstPad* pad, GstPadProbeInfo* in
 bool CameraSource::createSourceChain(const CameraConfig& config) {
     gchar elementName[64];
     
-    g_snprintf(elementName, sizeof(elementName), "intervideosrc_%d", index_);
-    elements_.intervideosrc = gst_element_factory_make("intervideosrc", elementName);
+    g_snprintf(elementName, sizeof(elementName), "shmsrc_%d", index_);
+    elements_.shmsrc = gst_element_factory_make("shmsrc", elementName);
 
-    // 카메라별 채널 설정
-    const char* channel_name = (type_ == CameraType::RGB) ? "RGB_Camera" : "Thermal_Camera";
-    g_object_set(elements_.intervideosrc, "channel", channel_name, nullptr);
+    const char* socket_path = (type_ == CameraType::RGB) 
+        ? "/tmp/RGB_Camera.sock" 
+        : "/tmp/Thermal_Camera.sock";
+
+    g_object_set(elements_.shmsrc,
+                "socket-path", socket_path,
+                "is-live", TRUE,
+                nullptr);
+    
+    elements_.shm_capsfilter = gst_element_factory_make("capsfilter", nullptr);
+    GstCaps* shm_caps = gst_caps_new_simple("video/x-raw",
+        "format", G_TYPE_STRING, "I420",
+        "width", G_TYPE_INT, config.source.width,
+        "height", G_TYPE_INT, config.source.height,
+        "framerate", GST_TYPE_FRACTION, config.source.framerate, 1,
+        nullptr);
+    g_object_set(elements_.shm_capsfilter, "caps", shm_caps, nullptr);
+    gst_caps_unref(shm_caps);
     
     // 컨버터
     elements_.converter1 = gst_element_factory_make("nvvideoconvert", nullptr);
@@ -169,18 +185,6 @@ bool CameraSource::createSourceChain(const CameraConfig& config) {
 }
 
 bool CameraSource::createInferenceChain(const CameraConfig& config) {
-    // g_object_set(elements_.infer,
-    //          "config-file-path", config.inference.config_file.c_str(),
-    //          "unique-id", index_ + 1,
-    //          nullptr);
-
-    // // 파일 존재 확인
-    // if (!g_file_test(config.inference.config_file.c_str(), G_FILE_TEST_EXISTS)) {
-    //     LOG_ERROR("추론 설정 파일이 없습니다: %s", config.inference.config_file.c_str());
-    //     return false;
-    // }
-    // LOG_INFO("추론 설정 파일 확인됨: %s", config.inference.config_file.c_str());
-
     // 추론을 위한 체인
     elements_.queue2 = gst_element_factory_make("queue", nullptr);
     if (elements_.queue2) {
@@ -192,9 +196,29 @@ bool CameraSource::createInferenceChain(const CameraConfig& config) {
                     nullptr);
         LOG_INFO("Queue2 생성 및 설정 완료");
     }
+
     elements_.videoscale = gst_element_factory_make("videoscale", nullptr);
+    elements_.videoscale_capsfilter = gst_element_factory_make("capsfilter", nullptr);
+    GstCaps* videoscale_caps = gst_caps_new_simple("video/x-raw",
+        "width", G_TYPE_INT, config.inference.scale_width,
+        "height", G_TYPE_INT, config.inference.scale_height,
+        nullptr);
+    g_object_set(elements_.videoscale_capsfilter, "caps", videoscale_caps, nullptr);
+    gst_caps_unref(videoscale_caps);
+
     elements_.converter2 = gst_element_factory_make("nvvideoconvert", nullptr);
-    
+    elements_.converter2_capsfilter = gst_element_factory_make("capsfilter", nullptr);
+    GstCaps* converter_caps = gst_caps_new_simple("video/x-raw",
+        "format", G_TYPE_STRING, "NV12",
+        "width", G_TYPE_INT, config.inference.scale_width,
+        "height", G_TYPE_INT, config.inference.scale_height,
+        "framerate", GST_TYPE_FRACTION, config.source.framerate, 1,
+        nullptr);
+    GstCapsFeatures* features = gst_caps_features_new("memory:NVMM", nullptr);
+    gst_caps_set_features(converter_caps, 0, features);
+    g_object_set(elements_.converter2_capsfilter, "caps", converter_caps, nullptr);
+    gst_caps_unref(converter_caps);
+
     // Mux
     elements_.mux = gst_element_factory_make("nvstreammux", nullptr);
     g_object_set(elements_.mux,
@@ -232,14 +256,14 @@ bool CameraSource::linkElements(const CameraConfig& config) {
     
     // ========== 1. 기본 소스 체인 생성 ==========
     gst_bin_add_many(GST_BIN(pipeline_),
-        elements_.intervideosrc, elements_.converter1, elements_.clockoverlay,
-        elements_.videorate, elements_.capsfilter, elements_.queue1,
+        elements_.shmsrc, elements_.shm_capsfilter, elements_.converter1, /*elements_.clockoverlay,*/
+        /*elements_.videorate, elements_.capsfilter,*/ elements_.queue1,
         elements_.tee, nullptr);
     
     if (!gst_element_link_many(
-            elements_.intervideosrc, elements_.converter1, 
-            elements_.clockoverlay, elements_.videorate, 
-            elements_.capsfilter, elements_.queue1,
+            elements_.shmsrc, elements_.shm_capsfilter, elements_.converter1, 
+            /*elements_.clockoverlay, elements_.videorate, */
+            /*elements_.capsfilter,*/elements_.queue1,
             elements_.tee, nullptr)) {
         LOG_ERROR("Failed to link source chain");
         return false;
@@ -251,7 +275,7 @@ bool CameraSource::linkElements(const CameraConfig& config) {
         
         // 2-1. 추론 체인 요소들 파이프라인에 추가
         gst_bin_add_many(GST_BIN(pipeline_),
-            elements_.queue2, elements_.videoscale, elements_.converter2,
+            elements_.queue2, elements_.videoscale, elements_.videoscale_capsfilter, elements_.converter2, elements_.converter2_capsfilter,
             elements_.mux, elements_.infer, elements_.nvof,
             elements_.converter3, elements_.postproc, elements_.osd,
             elements_.converter4, nullptr);
@@ -315,23 +339,48 @@ bool CameraSource::linkElements(const CameraConfig& config) {
         gst_element_link(elements_.converter4, main_tee);
         
         // 2-5. WebRTC Inter 출력 (main_tee에서)
-        char webrtc_queue_name[32], webrtc_conv_name[32], webrtc_sink_name[32];
+        char webrtc_queue_name[32], webrtc_conv_name[32], webrtc_caps_name[32], webrtc_sink_name[32];
         snprintf(webrtc_queue_name, sizeof(webrtc_queue_name), "webrtc_queue_%d", index_);
         snprintf(webrtc_conv_name, sizeof(webrtc_conv_name), "webrtc_conv_%d", index_);
+        snprintf(webrtc_caps_name, sizeof(webrtc_caps_name), "webrtc_caps_%d", index_);
         snprintf(webrtc_sink_name, sizeof(webrtc_sink_name), "webrtc_sink_%d", index_);
 
         GstElement* webrtc_queue = gst_element_factory_make("queue", webrtc_queue_name);
         GstElement* webrtc_conv = gst_element_factory_make("nvvideoconvert", webrtc_conv_name);
+        GstElement* webrtc_caps = gst_element_factory_make("capsfilter", webrtc_caps_name);
         GstElement* webrtc_sink = gst_element_factory_make("intervideosink", webrtc_sink_name);
 
-        const char* webrtc_channel = (type_ == CameraType::RGB) ? "aicds" : "Webrtc_Thermal_Camera";
+        const char* webrtc_channel = (type_ == CameraType::RGB) ? "Webrtc_RGB_Camera" : "Webrtc_Thermal_Camera";
         
         LOG_INFO("Creating intervideosink with channel: %s", webrtc_channel);
+
+        GstCaps* caps = nullptr;
+        if (type_ == CameraType::RGB) {
+            caps = gst_caps_new_simple("video/x-raw",
+                "format", G_TYPE_STRING, "I420",
+                "width", G_TYPE_INT, 1280,
+                "height", G_TYPE_INT, 720,
+                "framerate", GST_TYPE_FRACTION, 10, 1,
+                nullptr);
+        } else {  // Thermal
+            caps = gst_caps_new_simple("video/x-raw",
+                "format", G_TYPE_STRING, "I420",
+                "width", G_TYPE_INT, 384,
+                "height", G_TYPE_INT, 288,
+                "framerate", GST_TYPE_FRACTION, 10, 1,
+                nullptr);
+        }
+        g_object_set(webrtc_caps, "caps", caps, nullptr);
+
         g_object_set(webrtc_sink, "channel", webrtc_channel, nullptr);
         g_object_set(webrtc_queue, "max-size-buffers", 5, "leaky", 2, nullptr);
 
-        // 요소들을 파이프라인에 추가
-        gst_bin_add_many(GST_BIN(pipeline_), webrtc_queue, webrtc_conv, webrtc_sink, nullptr);
+        char capsfilter_name[32];
+        snprintf(capsfilter_name, sizeof(capsfilter_name), "webrtc_capsfilter_%d", index_);
+        GstElement* capsfilter = gst_element_factory_make("capsfilter", capsfilter_name);
+
+       gst_bin_add_many(GST_BIN(pipeline_), webrtc_queue, webrtc_conv, 
+                 webrtc_caps, webrtc_sink, nullptr);
 
         // main_tee에서 WebRTC queue로 연결
         GstPad* tee_webrtc_pad = gst_element_get_request_pad(main_tee, "src_%u");
@@ -348,33 +397,36 @@ bool CameraSource::linkElements(const CameraConfig& config) {
         gst_object_unref(webrtc_queue_sink);
 
         // WebRTC 체인 연결
-        if (!gst_element_link_many(webrtc_queue, webrtc_conv, webrtc_sink, nullptr)) {
+        if (!gst_element_link_many(webrtc_queue, webrtc_conv, webrtc_caps, webrtc_sink, nullptr)) {
             LOG_ERROR("Failed to link WebRTC elements!");
+            gst_caps_unref(caps);
             return false;
         }
 
+        gst_caps_unref(caps);
+
         LOG_INFO("WebRTC Inter 출력 추가 완료: channel=%s (1280x720)", webrtc_channel);
         
-        // 2-6. Fakesink (파이프라인 안정성용)
-        char fakesink_queue_name[32], fakesink_name[32];
-        snprintf(fakesink_queue_name, sizeof(fakesink_queue_name), "fakesink_queue_%d", index_);
-        snprintf(fakesink_name, sizeof(fakesink_name), "fakesink_%d", index_);
+        // // 2-6. Fakesink (파이프라인 안정성용)
+        // char fakesink_queue_name[32], fakesink_name[32];
+        // snprintf(fakesink_queue_name, sizeof(fakesink_queue_name), "fakesink_queue_%d", index_);
+        // snprintf(fakesink_name, sizeof(fakesink_name), "fakesink_%d", index_);
         
-        GstElement* fakesink_queue = gst_element_factory_make("queue", fakesink_queue_name);
-        GstElement* fakesink = gst_element_factory_make("fakesink", fakesink_name);
+        // GstElement* fakesink_queue = gst_element_factory_make("queue", fakesink_queue_name);
+        // GstElement* fakesink = gst_element_factory_make("fakesink", fakesink_name);
         
-        g_object_set(fakesink_queue, "max-size-buffers", 1, "leaky", 2, NULL);
-        g_object_set(fakesink, "sync", FALSE, NULL);
+        // g_object_set(fakesink_queue, "max-size-buffers", 1, "leaky", 2, NULL);
+        // g_object_set(fakesink, "sync", FALSE, NULL);
         
-        gst_bin_add_many(GST_BIN(pipeline_), fakesink_queue, fakesink, nullptr);
+        // gst_bin_add_many(GST_BIN(pipeline_), fakesink_queue, fakesink, nullptr);
         
-        GstPad* tee_fake_pad = gst_element_get_request_pad(main_tee, "src_%u");
-        GstPad* fake_queue_sink = gst_element_get_static_pad(fakesink_queue, "sink");
-        gst_pad_link(tee_fake_pad, fake_queue_sink);
-        gst_object_unref(tee_fake_pad);
-        gst_object_unref(fake_queue_sink);
+        // GstPad* tee_fake_pad = gst_element_get_request_pad(main_tee, "src_%u");
+        // GstPad* fake_queue_sink = gst_element_get_static_pad(fakesink_queue, "sink");
+        // gst_pad_link(tee_fake_pad, fake_queue_sink);
+        // gst_object_unref(tee_fake_pad);
+        // gst_object_unref(fake_queue_sink);
         
-        gst_element_link(fakesink_queue, fakesink);
+        // gst_element_link(fakesink_queue, fakesink);
 
         elements_.main_tee = main_tee;
         LOG_INFO("추론 체인 연결 완료");
@@ -591,7 +643,7 @@ bool CameraSource::addProbes() {
     // 모든 주요 요소에 프로브 추가
     LOG_INFO("Adding probes to track caps...");
     
-    addCapsProbe(elements_.intervideosrc, "1_intervideosrc");
+    addCapsProbe(elements_.shmsrc, "1_shmsrc");
     addCapsProbe(elements_.converter1, "2_converter1");
     addCapsProbe(elements_.tee, "3_tee");
     
@@ -741,6 +793,15 @@ bool CameraSource::addProbes() {
                     return GST_PAD_PROBE_OK;
                 }, this, nullptr);
             gst_object_unref(pad);
+        }
+    }
+
+    if (elements_.osd) {
+        GstPad* osd_sink_pad = gst_element_get_static_pad(elements_.osd, "sink");
+        if (osd_sink_pad) {
+            gst_pad_add_probe(osd_sink_pad, GST_PAD_PROBE_TYPE_BUFFER,
+                CameraSource::osdSinkPadProbe, this, nullptr);
+            gst_object_unref(osd_sink_pad);
         }
     }
     

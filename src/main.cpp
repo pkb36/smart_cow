@@ -409,6 +409,8 @@ int main(int argc, char* argv[]) {
             // 30초마다 서버로 전송
             g_signalingClient->startStatusReporting(30);
         }
+
+        LOG_INFO("Generated pipeline string:\n%s", g_pipeline->getPipelineString().c_str());
         // 메인 루프 생성
         g_mainLoop = g_main_loop_new(nullptr, FALSE);
         
