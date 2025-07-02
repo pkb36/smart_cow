@@ -7,19 +7,10 @@
 #include <gstnvdsmeta.h>
 #include <unordered_map>
 #include <mutex>
-#include <nvdsmeta.h>
 #include "../common/Types.h"
 #include "../detection/Detector.h"
 
 class DetectionBuffer;
-
-struct InferenceStats {
-    uint32_t frameCount = 0;
-    double totalTime = 0.0;
-    double minTime = std::numeric_limits<double>::max();
-    double maxTime = 0.0;
-    std::chrono::high_resolution_clock::time_point lastTime;
-};
 
 class CameraSource {
 public:
@@ -27,73 +18,46 @@ public:
     ~CameraSource();
     
     bool init(const CameraConfig& config, GstElement* pipeline);
-    bool link();
     
-    // 요소 접근
-    GstElement* getSourceElement() const;
-    GstElement* getTeeElement() const;
-    GstElement* getOutputElement() const;
+    // 검출 버퍼 접근
+    DetectionBuffer* getDetectionBuffer() const { return detectionBuffer_.get(); }
+    
+    // 동적 피어 관리
+    bool addPeerOutput(const std::string& peerId);
+    bool removePeerOutput(const std::string& peerId);
+    
+    // 메인 Tee 접근 (필요시)
+    GstElement* getMainTee() const { return elements_.main_tee; }
+    
+private:
+    // 파이프라인 구성
+    bool createSourceChain(const CameraConfig& config);
+    bool createInferenceChain(const CameraConfig& config);
+    bool linkElements(const CameraConfig& config);
+    bool addProbes();
     
     // 프로브 콜백
     static GstPadProbeReturn osdSinkPadProbe(GstPad* pad, GstPadProbeInfo* info, gpointer userData);
     
-    // 검출 버퍼 접근
-    DetectionBuffer* getDetectionBuffer() const;
-    bool createPipeline(const CameraConfig& config);
-    bool createSourceChain(const CameraConfig& config);
-    bool createInferenceChain(const CameraConfig& config);
-    bool createEncoderChain(const CameraConfig& config);
-    bool linkElements(const CameraConfig& config);
-    bool addProbes();
-
-    // 동적 피어 관리
-    bool addPeerOutput(const std::string& peerId);
-    bool removePeerOutput(const std::string& peerId);
-    GstElement* getMainTee() const { return elements_.main_tee; }
-private:
-    bool parseAndCreateSource(const std::string& sourceStr);
-    bool addElementsToPipeline(GstElement* pipeline);
-    bool linkInternalElements();
-    bool setupProbes();
-    BboxColor determineObjectColor(NvDsObjectMeta* objMeta);
-    void saveBufferAsImage(GstBuffer* buffer, GstCaps* caps, int frameNumber);
-    void convertToJpeg(const char* rawFile, int width, int height, GstVideoFormat format, int frameNumber);
+    // 이벤트 처리
     void handleDetectionEvent(const DetectionData& detection);
+    
 private:
     CameraType type_;
     int index_;
-    GstElement* pipeline_; 
+    GstElement* pipeline_;
+    
+    // 검출 관련
     std::unique_ptr<Detector> detector_;
-    std::unique_ptr<InferenceStats> inferStats_;
-    
-    // GStreamer 요소들
-    GstElement* source_;
-    GstElement* decoder_;
-    GstElement* converter_;
-    GstElement* clockOverlay_;
-    GstElement* tee_;
-    GstElement* queue_;
-    GstElement* scale_;
-    GstElement* mux_;
-    GstElement* infer_;
-    GstElement* tracker_;
-    GstElement* postproc_;
-    GstElement* osd_;
-    GstElement* outputConverter_;
-    
-    // 검출 버퍼
     std::unique_ptr<DetectionBuffer> detectionBuffer_;
     
     // 설정
     CameraConfig config_;
-
+    
+    // GStreamer 요소들 (구조체로 통합 관리)
     struct Elements {
         // 소스 체인
         GstElement* intervideosrc;
-        GstElement* udpsrc;
-        GstElement* rtpdepay;
-        GstElement* parser;
-        GstElement* decoder;
         GstElement* converter1;
         GstElement* clockoverlay;
         GstElement* videorate;
@@ -101,7 +65,7 @@ private:
         GstElement* queue1;
         GstElement* tee;
         
-        // 추론 체인
+        // 추론 체인 (옵션)
         GstElement* queue2;
         GstElement* videoscale;
         GstElement* converter2;
@@ -113,27 +77,16 @@ private:
         GstElement* osd;
         GstElement* converter4;
         
-        // 인코더 체인
-        GstElement* queue3;
-        GstElement* encoder_convert;
-        GstElement* encoder;
-        GstElement* payloader;
-        GstElement* queue4;
-        GstElement* sink;
-
+        // 메인 출력 Tee
         GstElement* main_tee;
-        GstElement* udpsink;
-        GstElement* rtppay;
     } elements_;
-
+    
+    // 피어별 출력 (간소화)
     struct PeerOutput {
         std::string peerId;
-        int port;
         GstElement* queue;
-        GstElement* encoder_convert;  // 추가
-        GstElement* encoder;          // 추가
-        GstElement* payloader;        // 추가
-        GstElement* udpsink;
+        GstElement* converter;
+        GstElement* intervideosink;
         GstPad* teeSrcPad;
         GstPad* queueSinkPad;
     };
