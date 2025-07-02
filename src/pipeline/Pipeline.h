@@ -19,7 +19,7 @@ public:
     bool start();
     void stop();
     bool isRunning() const;
-    
+    void printPipelineElements();
     // 파이프라인 상태
     GstState getState() const;
     
@@ -80,7 +80,7 @@ private:
     bool linkElements();
     
     static gboolean busCallback(GstBus* bus, GstMessage* message, gpointer data);
-    
+    void printBinElements(GstBin* bin, int level);
 private:
     GstElement* pipeline_;
     GstBus* bus_;

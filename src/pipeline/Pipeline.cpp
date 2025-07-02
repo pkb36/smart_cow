@@ -83,67 +83,8 @@ bool Pipeline::start() {
         
         return false;
     }
-    
-    // 3초 후 모든 요소 상태 확인
-    g_timeout_add(3000, [](gpointer data) -> gboolean {
-        Pipeline* self = static_cast<Pipeline*>(data);
-        
-        // 파이프라인의 모든 요소 순회
-        GstIterator* it = gst_bin_iterate_elements(GST_BIN(self->pipeline_));
-        GValue item = G_VALUE_INIT;
-        gboolean done = FALSE;
-        
-        LOG_INFO("=== 파이프라인 요소 상태 ===");
-        while (!done) {
-            switch (gst_iterator_next(it, &item)) {
-                case GST_ITERATOR_OK: {
-                    GstElement* element = GST_ELEMENT(g_value_get_object(&item));
-                    GstState state, pending;
-                    gst_element_get_state(element, &state, &pending, 0);
-                    
-                    const gchar* name = gst_element_get_name(element);
-                    // LOG_INFO("요소: %s, 상태: %s, 대기: %s",
-                    //         name,
-                    //         gst_element_state_get_name(state),
-                    //         gst_element_state_get_name(pending));
-                    
-                    g_value_reset(&item);
-                    break;
-                }
-                case GST_ITERATOR_DONE:
-                    done = TRUE;
-                    break;
-                default:
-                    break;
-            }
-        }
-        g_value_unset(&item);
-        gst_iterator_free(it);
 
-        const char* infer_elements[] = {
-            "infer_queue_0", "infer_scale_0", "infer_conv_0", 
-            "RGB", "nvinfer_1", "nvof", "dspostproc_1", "nvosd_1",
-            "infer_queue_1", "infer_scale_1", "infer_conv_1",
-            "thermal", "nvinfer_2", "dspostproc_2", "nvosd_2"
-        };
-
-        for (const char* name : infer_elements) {
-            GstElement* elem = gst_bin_get_by_name(GST_BIN(self->pipeline_), name);
-            if (elem) {
-                GstState state, pending;
-                gst_element_get_state(elem, &state, &pending, 0);
-                if (state != GST_STATE_PLAYING) {
-                    LOG_WARN("요소 %s 상태: %s (대기: %s)", 
-                            name, 
-                            gst_element_state_get_name(state),
-                            gst_element_state_get_name(pending));
-                }
-                gst_object_unref(elem);
-            }
-        }
-        
-        return FALSE; // 한 번만 실행
-    }, this);
+    printPipelineElements();
 
     LOG_INFO("Pipeline started");
     return true;
@@ -303,137 +244,26 @@ bool Pipeline::setupOutputs(const Config& config) {
     outputs_.clear();
     
     int deviceCount = config.getDeviceCount();
-    int maxStreamCount = config.getMaxStreamCount();
-    int basePort = config.getStreamBasePort();
     
-    // 각 카메라에 대해 스트림 출력 생성
+    // 각 카메라의 main_tee 찾기 (Inter Plugin 방식)
     for (int cam = 0; cam < deviceCount; cam++) {
-        GstElement* mainTee = nullptr;
-        GstElement* subTee = nullptr;
-        
-        // Tee 요소 찾기 - 인코더 체인 내부에서 찾기
-        gchar teeName[64];
-        g_snprintf(teeName, sizeof(teeName), "video_enc_tee1_%d", cam);
-        
-        // 먼저 파이프라인 레벨에서 찾기
-        mainTee = gst_bin_get_by_name(GST_BIN(pipeline_), teeName);
-        
-        if (!mainTee) {
-            // 인코더 bin 내부에서 찾기
-            gchar binName[64];
-            g_snprintf(binName, sizeof(binName), "encoder1_%d", cam);
-            GstElement* encBin = gst_bin_get_by_name(GST_BIN(pipeline_), binName);
-            if (encBin) {
-                mainTee = gst_bin_get_by_name(GST_BIN(encBin), teeName);
-                if (!mainTee) {
-                    // bin 내부의 모든 요소를 순회하며 tee 찾기
-                    GstIterator* it = gst_bin_iterate_elements(GST_BIN(encBin));
-                    GValue item = G_VALUE_INIT;
-                    gboolean done = FALSE;
-                    
-                    while (!done) {
-                        switch (gst_iterator_next(it, &item)) {
-                            case GST_ITERATOR_OK: {
-                                GstElement* element = GST_ELEMENT(g_value_get_object(&item));
-                                gchar* elemName = gst_element_get_name(element);
-                                if (g_str_has_prefix(elemName, "video_enc_tee1_")) {
-                                    mainTee = GST_ELEMENT(gst_object_ref(element));
-                                    done = TRUE;
-                                }
-                                g_free(elemName);
-                                g_value_reset(&item);
-                                break;
-                            }
-                            case GST_ITERATOR_DONE:
-                                done = TRUE;
-                                break;
-                            default:
-                                break;
-                        }
-                    }
-                    g_value_unset(&item);
-                    gst_iterator_free(it);
-                }
-                gst_object_unref(encBin);
+        // CameraSource에서 main_tee 가져오기
+        if (cam < cameras_.size()) {
+            GstElement* mainTee = cameras_[cam]->getMainTee();  // 새 메서드 필요
+            
+            if (mainTee) {
+                LOG_INFO("Found main_tee for camera %d", cam);
+                
+                // WebRTC용 출력은 이미 CameraSource에서 생성됨
+                // 추가 출력이 필요한 경우에만 여기서 생성
+                
+            } else {
+                LOG_WARN("Main tee not found for camera %d", cam);
             }
-        }
-        
-        if (!mainTee) {
-            LOG_WARN("Main tee not found for camera %d", cam);
-            continue;
-        }
-        
-        // 서브 tee 찾기
-        g_snprintf(teeName, sizeof(teeName), "video_enc_tee2_%d", cam);
-        subTee = gst_bin_get_by_name(GST_BIN(pipeline_), teeName);
-        
-        if (!subTee) {
-            // 인코더2 bin 내부에서 찾기
-            gchar binName[64];
-            g_snprintf(binName, sizeof(binName), "encoder2_%d", cam);
-            GstElement* encBin = gst_bin_get_by_name(GST_BIN(pipeline_), binName);
-            if (encBin) {
-                subTee = gst_bin_get_by_name(GST_BIN(encBin), teeName);
-                if (!subTee) {
-                    // bin 내부의 모든 요소를 순회하며 tee 찾기
-                    GstIterator* it = gst_bin_iterate_elements(GST_BIN(encBin));
-                    GValue item = G_VALUE_INIT;
-                    gboolean done = FALSE;
-                    
-                    while (!done) {
-                        switch (gst_iterator_next(it, &item)) {
-                            case GST_ITERATOR_OK: {
-                                GstElement* element = GST_ELEMENT(g_value_get_object(&item));
-                                gchar* elemName = gst_element_get_name(element);
-                                if (g_str_has_prefix(elemName, "video_enc_tee2_")) {
-                                    subTee = GST_ELEMENT(gst_object_ref(element));
-                                    done = TRUE;
-                                }
-                                g_free(elemName);
-                                g_value_reset(&item);
-                                break;
-                            }
-                            case GST_ITERATOR_DONE:
-                                done = TRUE;
-                                break;
-                            default:
-                                break;
-                        }
-                    }
-                    g_value_unset(&item);
-                    gst_iterator_free(it);
-                }
-                gst_object_unref(encBin);
-            }
-        }
-        
-        LOG_INFO("Found tees for camera %d: main=%p, sub=%p", cam, mainTee, subTee);
-        
-        // 메인 스트림 출력 (Sender + Recorder + Event Recorder)
-        for (int stream = 0; stream < maxStreamCount + 2; stream++) {
-            auto output = std::make_unique<StreamOutput>(cam, stream, StreamOutput::MAIN_STREAM);
-            if (output->init(pipeline_, mainTee, basePort)) {
-                outputs_.push_back(std::move(output));
-            }
-        }
-        
-        // 서브 스트림 출력 (Sender + Recorder + Event Recorder)
-        if (subTee) {
-            for (int stream = 0; stream < maxStreamCount + 2; stream++) {
-                auto output = std::make_unique<StreamOutput>(cam, stream, StreamOutput::SUB_STREAM);
-                if (output->init(pipeline_, subTee, basePort)) {
-                    outputs_.push_back(std::move(output));
-                }
-            }
-            gst_object_unref(subTee);
-        }
-        
-        if (mainTee) {
-            gst_object_unref(mainTee);
         }
     }
     
-    LOG_INFO("Set up %zu stream outputs", outputs_.size());
+    LOG_INFO("Setup completed for Inter Plugin outputs");
     return true;
 }
 
@@ -454,4 +284,49 @@ gboolean Pipeline::busCallback(GstBus* bus, GstMessage* message, gpointer data) 
     Pipeline* self = static_cast<Pipeline*>(data);
     self->handleBusMessage(message);
     return TRUE;
+}
+
+void Pipeline::printPipelineElements() {
+    if (!pipeline_) {
+        printf("Pipeline is NULL\n");
+        return;
+    }
+    
+    printf("\n=== PIPELINE STRUCTURE ===\n");
+    printf("Pipeline: %s\n", GST_ELEMENT_NAME(pipeline_));
+    
+    printBinElements(GST_BIN(pipeline_), 1);
+    
+    printf("========================\n\n");
+}
+
+void Pipeline::printBinElements(GstBin* bin, int level) {
+    GstIterator* it = gst_bin_iterate_elements(bin);
+    GValue item = G_VALUE_INIT;
+    
+    while (gst_iterator_next(it, &item) == GST_ITERATOR_OK) {
+        GstElement* element = GST_ELEMENT(g_value_get_object(&item));
+        
+        // 들여쓰기
+        for (int i = 0; i < level; i++) {
+            printf("  ");
+        }
+        
+        gchar* name = gst_element_get_name(element);
+        gchar* factory_name = gst_plugin_feature_get_name(
+            GST_PLUGIN_FEATURE(gst_element_get_factory(element)));
+        
+        printf("├─ %s (%s)\n", name, factory_name);
+        
+        // Bin인 경우 재귀적으로 출력
+        if (GST_IS_BIN(element)) {
+            printBinElements(GST_BIN(element), level + 1);
+        }
+        
+        g_free(name);
+        g_value_reset(&item);
+    }
+    
+    g_value_unset(&item);
+    gst_iterator_free(it);
 }

@@ -73,7 +73,7 @@ bool PeerManager::addPeer(const std::string& peerId, CameraType source) {
         if (pipeline_) {
             auto camera = pipeline_->getCamera(camIdx);
             if (camera) {
-                if (!camera->addPeerOutput(peerId, camStreamPort)) {
+                if (!camera->addPeerOutput(peerId)) {
                     LOG_ERROR("Failed to add peer output for camera %d", camIdx);
                     cameraOutputsAdded = false;
                     

@@ -47,7 +47,7 @@ public:
     bool addProbes();
 
     // 동적 피어 관리
-    bool addPeerOutput(const std::string& peerId, int streamPort);
+    bool addPeerOutput(const std::string& peerId);
     bool removePeerOutput(const std::string& peerId);
     GstElement* getMainTee() const { return elements_.main_tee; }
 private:
@@ -89,6 +89,7 @@ private:
 
     struct Elements {
         // 소스 체인
+        GstElement* intervideosrc;
         GstElement* udpsrc;
         GstElement* rtpdepay;
         GstElement* parser;
