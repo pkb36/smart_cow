@@ -80,19 +80,6 @@ private:
         // 메인 출력 Tee
         GstElement* main_tee;
     } elements_;
-    
-    // 피어별 출력 (간소화)
-    struct PeerOutput {
-        std::string peerId;
-        GstElement* queue;
-        GstElement* converter;
-        GstElement* intervideosink;
-        GstPad* teeSrcPad;
-        GstPad* queueSinkPad;
-    };
-    
-    std::unordered_map<std::string, std::unique_ptr<PeerOutput>> peerOutputs_;
-    mutable std::mutex peerOutputsMutex_;
 };
 
 #endif // CAMERA_SOURCE_H

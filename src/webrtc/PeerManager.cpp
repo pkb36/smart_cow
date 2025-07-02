@@ -65,31 +65,6 @@ bool PeerManager::addPeer(const std::string& peerId, CameraType source) {
     const int DEVICE_COUNT = 2;  // RGB + Thermal
     bool cameraOutputsAdded = true;
     
-    for (int camIdx = 0; camIdx < DEVICE_COUNT; camIdx++) {
-        // 각 카메라별 포트 계산
-        int camStreamPort = streamPort + camIdx;
-        
-        // Pipeline을 통해 CameraSource에 접근
-        if (pipeline_) {
-            auto camera = pipeline_->getCamera(camIdx);
-            if (camera) {
-                if (!camera->addPeerOutput(peerId)) {
-                    LOG_ERROR("Failed to add peer output for camera %d", camIdx);
-                    cameraOutputsAdded = false;
-                    
-                    // 이미 추가된 카메라 출력 제거
-                    for (int i = 0; i < camIdx; i++) {
-                        auto prevCamera = pipeline_->getCamera(i);
-                        if (prevCamera) {
-                            prevCamera->removePeerOutput(peerId);
-                        }
-                    }
-                    break;
-                }
-            }
-        }
-    }
-    
     if (!cameraOutputsAdded) {
         releaseStreamPort(streamPort);
         releaseCommSocket(commSocket);

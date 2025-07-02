@@ -25,36 +25,6 @@ CameraSource::CameraSource(CameraType type, int index)
 }
 
 CameraSource::~CameraSource() {
-    // 동적으로 추가된 피어 출력들 정리
-    {
-        std::lock_guard<std::mutex> lock(peerOutputsMutex_);
-        for (auto& pair : peerOutputs_) {
-            // removePeerOutput이 호출되지 않은 경우를 위한 안전장치
-            PeerOutput* peerOutput = pair.second.get();
-            if (peerOutput) {
-                // 패드 연결 해제
-                if (peerOutput->teeSrcPad && peerOutput->queueSinkPad) {
-                    gst_pad_unlink(peerOutput->teeSrcPad, peerOutput->queueSinkPad);
-                }
-                
-                // Tee request pad 해제
-                if (peerOutput->teeSrcPad && elements_.main_tee) {
-                    gst_element_release_request_pad(elements_.main_tee, peerOutput->teeSrcPad);
-                    gst_object_unref(peerOutput->teeSrcPad);
-                }
-                
-                // Queue sink pad 해제
-                if (peerOutput->queueSinkPad) {
-                    gst_object_unref(peerOutput->queueSinkPad);
-                }
-            }
-        }
-        peerOutputs_.clear();
-    }
-    
-    // 요소들은 파이프라인이 관리하므로 여기서는 unref하지 않음
-    // GStreamer는 파이프라인이 NULL 상태가 될 때 자동으로 정리
-    
     LOG_INFO("CameraSource destroyed: %s camera (index=%d)",
              (type_ == CameraType::RGB) ? "RGB" : "THERMAL", index_);
 }
@@ -275,18 +245,18 @@ bool CameraSource::linkElements(const CameraConfig& config) {
         return false;
     }
     
-    // ========== 3. 추론이 활성화된 경우 ==========
+    // ========== 2. 추론이 활성화된 경우 ==========
     if (config.inference.enabled) {
         LOG_INFO("추론 체인 연결 중... (Camera %d)", index_);
         
-        // 3-1. 추론 체인 요소들 파이프라인에 추가
+        // 2-1. 추론 체인 요소들 파이프라인에 추가
         gst_bin_add_many(GST_BIN(pipeline_),
             elements_.queue2, elements_.videoscale, elements_.converter2,
             elements_.mux, elements_.infer, elements_.nvof,
             elements_.converter3, elements_.postproc, elements_.osd,
             elements_.converter4, nullptr);
         
-        // 3-2. Tee → 추론 체인 연결
+        // 2-2. Tee → 추론 체인 연결
         GstPadTemplate* tee_template = gst_element_class_get_pad_template(
             GST_ELEMENT_GET_CLASS(elements_.tee), "src_%u");
             
@@ -300,7 +270,7 @@ bool CameraSource::linkElements(const CameraConfig& config) {
         }
         gst_object_unref(queue_pad);
         
-        // 3-3. 추론 체인 내부 연결
+        // 2-3. 추론 체인 내부 연결
         if (!gst_element_link(elements_.queue2, elements_.videoscale)) {
             LOG_ERROR("Failed to link queue2 to videoscale");
             return false;
@@ -334,7 +304,7 @@ bool CameraSource::linkElements(const CameraConfig& config) {
             return false;
         }
         
-        // 3-4. Main Tee 생성 및 연결
+        // 2-4. Main Tee 생성 및 연결
         char main_tee_name[32];
         snprintf(main_tee_name, sizeof(main_tee_name), "main_tee_%d", index_);
         
@@ -344,32 +314,48 @@ bool CameraSource::linkElements(const CameraConfig& config) {
         
         gst_element_link(elements_.converter4, main_tee);
         
-        // // 3-5. WebRTC Inter 출력 (Raw Video)
-        // char webrtc_queue_name[32], webrtc_conv_name[32], webrtc_sink_name[32];
-        // snprintf(webrtc_queue_name, sizeof(webrtc_queue_name), "webrtc_queue_%d", index_);
-        // snprintf(webrtc_conv_name, sizeof(webrtc_conv_name), "webrtc_conv_%d", index_);
-        // snprintf(webrtc_sink_name, sizeof(webrtc_sink_name), "webrtc_sink_%d", index_);
+        // 2-5. WebRTC Inter 출력 (main_tee에서)
+        char webrtc_queue_name[32], webrtc_conv_name[32], webrtc_sink_name[32];
+        snprintf(webrtc_queue_name, sizeof(webrtc_queue_name), "webrtc_queue_%d", index_);
+        snprintf(webrtc_conv_name, sizeof(webrtc_conv_name), "webrtc_conv_%d", index_);
+        snprintf(webrtc_sink_name, sizeof(webrtc_sink_name), "webrtc_sink_%d", index_);
 
-        // GstElement* webrtc_queue = gst_element_factory_make("queue", webrtc_queue_name);
-        // GstElement* webrtc_conv = gst_element_factory_make("nvvideoconvert", webrtc_conv_name);
-        // GstElement* webrtc_sink = gst_element_factory_make("intervideosink", webrtc_sink_name);
+        GstElement* webrtc_queue = gst_element_factory_make("queue", webrtc_queue_name);
+        GstElement* webrtc_conv = gst_element_factory_make("nvvideoconvert", webrtc_conv_name);
+        GstElement* webrtc_sink = gst_element_factory_make("intervideosink", webrtc_sink_name);
 
-        // const char* webrtc_channel = (type_ == CameraType::RGB) ? "Webrtc_RGB_Camera" : "Webrtc_Thermal_Camera";
-        // g_object_set(webrtc_sink, "channel", webrtc_channel, nullptr);
-        // g_object_set(webrtc_queue, "max-size-buffers", 5, "leaky", 2, nullptr);
-
-        // gst_bin_add_many(GST_BIN(pipeline_), webrtc_queue, webrtc_conv, webrtc_sink, nullptr);
-
-        // GstPad* tee_webrtc_pad = gst_element_get_request_pad(main_tee, "src_%u");
-        // GstPad* webrtc_queue_sink = gst_element_get_static_pad(webrtc_queue, "sink");
-        // gst_pad_link(tee_webrtc_pad, webrtc_queue_sink);
-        // gst_object_unref(tee_webrtc_pad);
-        // gst_object_unref(webrtc_queue_sink);
-
-        // gst_element_link_many(webrtc_queue, webrtc_conv, webrtc_sink, nullptr);
-        // LOG_INFO("WebRTC Inter 출력 추가 완료: channel=%s", webrtc_channel);
+        const char* webrtc_channel = (type_ == CameraType::RGB) ? "aicds" : "Webrtc_Thermal_Camera";
         
-        // 3-6. Fakesink (파이프라인 안정성용)
+        LOG_INFO("Creating intervideosink with channel: %s", webrtc_channel);
+        g_object_set(webrtc_sink, "channel", webrtc_channel, nullptr);
+        g_object_set(webrtc_queue, "max-size-buffers", 5, "leaky", 2, nullptr);
+
+        // 요소들을 파이프라인에 추가
+        gst_bin_add_many(GST_BIN(pipeline_), webrtc_queue, webrtc_conv, webrtc_sink, nullptr);
+
+        // main_tee에서 WebRTC queue로 연결
+        GstPad* tee_webrtc_pad = gst_element_get_request_pad(main_tee, "src_%u");
+        GstPad* webrtc_queue_sink = gst_element_get_static_pad(webrtc_queue, "sink");
+        
+        if (gst_pad_link(tee_webrtc_pad, webrtc_queue_sink) != GST_PAD_LINK_OK) {
+            LOG_ERROR("Failed to link main_tee to webrtc_queue!");
+            gst_object_unref(tee_webrtc_pad);
+            gst_object_unref(webrtc_queue_sink);
+            return false;
+        }
+        
+        gst_object_unref(tee_webrtc_pad);
+        gst_object_unref(webrtc_queue_sink);
+
+        // WebRTC 체인 연결
+        if (!gst_element_link_many(webrtc_queue, webrtc_conv, webrtc_sink, nullptr)) {
+            LOG_ERROR("Failed to link WebRTC elements!");
+            return false;
+        }
+
+        LOG_INFO("WebRTC Inter 출력 추가 완료: channel=%s (1280x720)", webrtc_channel);
+        
+        // 2-6. Fakesink (파이프라인 안정성용)
         char fakesink_queue_name[32], fakesink_name[32];
         snprintf(fakesink_queue_name, sizeof(fakesink_queue_name), "fakesink_queue_%d", index_);
         snprintf(fakesink_name, sizeof(fakesink_name), "fakesink_%d", index_);
@@ -394,14 +380,235 @@ bool CameraSource::linkElements(const CameraConfig& config) {
         LOG_INFO("추론 체인 연결 완료");
     }
     
+    // ========== 3. 추론이 비활성화된 경우 ==========
+    else {
+        LOG_INFO("추론 비활성화 - 직접 WebRTC 출력");
+        
+        // 원본 해상도로 바로 WebRTC 출력
+        char webrtc_queue_name[32], webrtc_conv_name[32], webrtc_sink_name[32];
+        snprintf(webrtc_queue_name, sizeof(webrtc_queue_name), "webrtc_queue_%d", index_);
+        snprintf(webrtc_conv_name, sizeof(webrtc_conv_name), "webrtc_conv_%d", index_);
+        snprintf(webrtc_sink_name, sizeof(webrtc_sink_name), "webrtc_sink_%d", index_);
+
+        GstElement* webrtc_queue = gst_element_factory_make("queue", webrtc_queue_name);
+        GstElement* webrtc_conv = gst_element_factory_make("nvvideoconvert", webrtc_conv_name);
+        GstElement* webrtc_sink = gst_element_factory_make("intervideosink", webrtc_sink_name);
+
+        const char* webrtc_channel = (type_ == CameraType::RGB) ? "Webrtc_RGB_Camera" : "Webrtc_Thermal_Camera";
+        g_object_set(webrtc_sink, "channel", webrtc_channel, nullptr);
+        g_object_set(webrtc_queue, "max-size-buffers", 5, "leaky", 2, nullptr);
+
+        gst_bin_add_many(GST_BIN(pipeline_), webrtc_queue, webrtc_conv, webrtc_sink, nullptr);
+
+        // tee에서 직접 연결
+        GstPad* tee_webrtc_pad = gst_element_get_request_pad(elements_.tee, "src_%u");
+        GstPad* webrtc_queue_sink = gst_element_get_static_pad(webrtc_queue, "sink");
+        
+        if (gst_pad_link(tee_webrtc_pad, webrtc_queue_sink) != GST_PAD_LINK_OK) {
+            LOG_ERROR("Failed to link tee to webrtc_queue!");
+            gst_object_unref(tee_webrtc_pad);
+            gst_object_unref(webrtc_queue_sink);
+            return false;
+        }
+        
+        gst_object_unref(tee_webrtc_pad);
+        gst_object_unref(webrtc_queue_sink);
+
+        if (!gst_element_link_many(webrtc_queue, webrtc_conv, webrtc_sink, nullptr)) {
+            LOG_ERROR("Failed to link WebRTC elements!");
+            return false;
+        }
+
+        LOG_INFO("WebRTC Inter 출력 추가 완료: channel=%s (원본 해상도)", webrtc_channel);
+    }
+    
     LOG_INFO("All elements linked successfully for %s camera",
              (type_ == CameraType::RGB) ? "RGB" : "THERMAL");
     
     return true;
 }
 
+void printElementCaps(GstElement* element, const char* name) {
+    GstPad* srcPad = gst_element_get_static_pad(element, "src");
+    if (srcPad) {
+        GstCaps* caps = gst_pad_get_current_caps(srcPad);
+        if (caps) {
+            gchar* caps_str = gst_caps_to_string(caps);
+            LOG_INFO("%s output caps: %s", name, caps_str);
+            g_free(caps_str);
+            gst_caps_unref(caps);
+        }
+        gst_object_unref(srcPad);
+    }
+}
+
 bool CameraSource::addProbes() {
-    // 1. 추론 직후 프레임 로깅 (nvinfer src pad)
+    // gchar* webrtc_conv_name = g_strdup_printf("webrtc_conv_%d", index_);
+    // gchar* webrtc_sink_name = g_strdup_printf("webrtc_sink_%d", index_);
+    
+    // GstElement* webrtc_conv = gst_bin_get_by_name(GST_BIN(pipeline_), webrtc_conv_name);
+    // GstElement* webrtc_sink = gst_bin_get_by_name(GST_BIN(pipeline_), webrtc_sink_name);
+    
+    // g_free(webrtc_conv_name);
+    // g_free(webrtc_sink_name);
+    
+    // if (webrtc_conv && webrtc_sink) {
+    //     LOG_INFO("Found WebRTC elements for probing");
+        
+    //     // 1. webrtc_conv 출력 확인
+    //     GstPad* conv_src_pad = gst_element_get_static_pad(webrtc_conv, "src");
+    //     if (conv_src_pad) {
+    //         gst_pad_add_probe(conv_src_pad, GST_PAD_PROBE_TYPE_BUFFER,
+    //             [](GstPad* pad, GstPadProbeInfo* info, gpointer userData) -> GstPadProbeReturn {
+    //                 CameraSource* self = static_cast<CameraSource*>(userData);
+    //                 static bool printed = false;
+                    
+    //                 if (!printed) {
+    //                     GstCaps* caps = gst_pad_get_current_caps(pad);
+    //                     if (caps) {
+    //                         gchar* caps_str = gst_caps_to_string(caps);
+    //                         LOG_ERROR(">>> webrtc_conv OUTPUT (before intervideosink): %s", caps_str);
+                            
+    //                         GstStructure* s = gst_caps_get_structure(caps, 0);
+    //                         gint width, height;
+    //                         if (gst_structure_get_int(s, "width", &width) &&
+    //                             gst_structure_get_int(s, "height", &height)) {
+    //                             LOG_ERROR(">>> Resolution going into intervideosink: %dx%d", width, height);
+    //                         }
+                            
+    //                         g_free(caps_str);
+    //                         gst_caps_unref(caps);
+    //                     }
+                        
+    //                     // 버퍼 정보도 확인
+    //                     GstBuffer* buffer = GST_PAD_PROBE_INFO_BUFFER(info);
+    //                     LOG_ERROR(">>> Buffer size: %zu bytes", gst_buffer_get_size(buffer));
+                        
+    //                     printed = true;
+    //                 }
+                    
+    //                 return GST_PAD_PROBE_OK;
+    //             }, this, nullptr);
+    //         gst_object_unref(conv_src_pad);
+    //     }
+        
+    //     // 2. intervideosink 입력 확인
+    //     GstPad* sink_pad = gst_element_get_static_pad(webrtc_sink, "sink");
+    //     if (sink_pad) {
+    //         gst_pad_add_probe(sink_pad, GST_PAD_PROBE_TYPE_BUFFER,
+    //             [](GstPad* pad, GstPadProbeInfo* info, gpointer userData) -> GstPadProbeReturn {
+    //                 CameraSource* self = static_cast<CameraSource*>(userData);
+    //                 static int counter = 0;
+                    
+    //                 if (counter++ == 0) {  // 첫 프레임만
+    //                     GstCaps* caps = gst_pad_get_current_caps(pad);
+    //                     if (caps) {
+    //                         gchar* caps_str = gst_caps_to_string(caps);
+    //                         LOG_ERROR(">>> intervideosink INPUT: %s", caps_str);
+                            
+    //                         // 채널명도 확인
+    //                         GstElement* sink = gst_pad_get_parent_element(pad);
+    //                         gchar* channel;
+    //                         g_object_get(sink, "channel", &channel, nullptr);
+    //                         LOG_ERROR(">>> intervideosink channel: %s", channel);
+    //                         g_free(channel);
+    //                         gst_object_unref(sink);
+                            
+    //                         g_free(caps_str);
+    //                         gst_caps_unref(caps);
+    //                     }
+    //                 }
+                    
+    //                 // 주기적으로 프레임 수 로그
+    //                 if (counter % 30 == 0) {
+    //                     LOG_INFO("intervideosink receiving frames: %d", counter);
+    //                 }
+                    
+    //                 return GST_PAD_PROBE_OK;
+    //             }, this, nullptr);
+    //         gst_object_unref(sink_pad);
+    //     }
+        
+    //     // 3. intervideosink 상태 확인
+    //     if (webrtc_sink) {
+    //         GstState state, pending;
+    //         gst_element_get_state(webrtc_sink, &state, &pending, 0);
+    //         LOG_ERROR(">>> intervideosink state: %s (pending: %s)", 
+    //                  gst_element_state_get_name(state),
+    //                  gst_element_state_get_name(pending));
+    //     }
+        
+    // } else {
+    //     LOG_WARN("WebRTC elements not found for camera %d", index_);
+    // }
+
+    auto addCapsProbe = [this](GstElement* element, const char* elementName) {
+        if (!element) return;
+        
+        GstPad* srcPad = gst_element_get_static_pad(element, "src");
+        if (!srcPad) return;
+        
+        gst_pad_add_probe(srcPad, GST_PAD_PROBE_TYPE_BUFFER,
+            [](GstPad* pad, GstPadProbeInfo* info, gpointer userData) -> GstPadProbeReturn {
+                const char* name = (const char*)userData;
+                static std::map<std::string, bool> printed;
+                
+                // 각 요소당 한 번만 출력
+                if (printed[name]) {
+                    return GST_PAD_PROBE_OK;
+                }
+                printed[name] = true;
+                
+                GstCaps* caps = gst_pad_get_current_caps(pad);
+                if (caps) {
+                    gchar* caps_str = gst_caps_to_string(caps);
+                    LOG_INFO("[PROBE] %s output: %s", name, caps_str);
+                    
+                    // Width/Height 추출
+                    GstStructure* structure = gst_caps_get_structure(caps, 0);
+                    gint width = 0, height = 0;
+                    if (gst_structure_get_int(structure, "width", &width) &&
+                        gst_structure_get_int(structure, "height", &height)) {
+                        
+                        LOG_INFO("[PROBE] %s resolution: %dx%d", name, width, height);
+                        
+                        // 320x240 발견!
+                        if (width == 320 && height == 240) {
+                            LOG_ERROR(">>> 320x240 detected at: %s <<<", name);
+                        }
+                    }
+                    
+                    g_free(caps_str);
+                    gst_caps_unref(caps);
+                }
+                
+                return GST_PAD_PROBE_OK;
+            }, (gpointer)g_strdup(elementName), g_free);
+            
+        gst_object_unref(srcPad);
+    };
+    
+    // 모든 주요 요소에 프로브 추가
+    LOG_INFO("Adding probes to track caps...");
+    
+    addCapsProbe(elements_.intervideosrc, "1_intervideosrc");
+    addCapsProbe(elements_.converter1, "2_converter1");
+    addCapsProbe(elements_.tee, "3_tee");
+    
+    if (config_.inference.enabled) {
+        addCapsProbe(elements_.queue2, "4_queue2");
+        addCapsProbe(elements_.videoscale, "5_videoscale");
+        addCapsProbe(elements_.converter2, "6_converter2");
+        addCapsProbe(elements_.mux, "7_mux");
+        addCapsProbe(elements_.infer, "8_infer");
+        addCapsProbe(elements_.converter3, "9_converter3");
+        addCapsProbe(elements_.postproc, "10_postproc");
+        addCapsProbe(elements_.osd, "11_osd");
+        addCapsProbe(elements_.converter4, "12_converter4");
+        addCapsProbe(elements_.main_tee, "13_main_tee");
+    }
+
+    // // 1. 추론 직후 프레임 로깅 (nvinfer src pad)
     // if (elements_.infer) {
     //     GstPad* inferSrcPad = gst_element_get_static_pad(elements_.infer, "src");
     //     if (inferSrcPad) {
@@ -541,268 +748,13 @@ bool CameraSource::addProbes() {
 }
 
 bool CameraSource::addPeerOutput(const std::string& peerId) {
-    std::lock_guard<std::mutex> lock(peerOutputsMutex_);
-    
-    if (peerOutputs_.find(peerId) != peerOutputs_.end()) {
-        LOG_WARN("WebRTC output already exists for peer: %s", peerId.c_str());
-        return false;
-    }
-    
-    if (!elements_.main_tee) {
-        LOG_ERROR("Main tee not available");
-        return false;
-    }
-    
-    // 1. 파이프라인 현재 상태 확인
-    GstState current_state;
-    GstStateChangeReturn state_ret = gst_element_get_state(pipeline_, &current_state, nullptr, 0);
-    LOG_INFO("Pipeline current state: %s", gst_element_state_get_name(current_state));
-    
-    // 2. 요소 생성
-    auto peerOutput = std::make_unique<PeerOutput>();
-    peerOutput->peerId = peerId;
-    
-    char queueName[64], convName[64], sinkName[64];
-    snprintf(queueName, sizeof(queueName), "webrtc_queue_%s_%d", peerId.c_str(), index_);
-    snprintf(convName, sizeof(convName), "webrtc_conv_%s_%d", peerId.c_str(), index_);
-    snprintf(sinkName, sizeof(sinkName), "webrtc_sink_%s_%d", peerId.c_str(), index_);
-    
-    peerOutput->queue = gst_element_factory_make("queue", queueName);
-    peerOutput->converter = gst_element_factory_make("nvvideoconvert", convName);
-    peerOutput->intervideosink = gst_element_factory_make("intervideosink", sinkName);
-    
-    if (!peerOutput->queue || !peerOutput->converter || !peerOutput->intervideosink) {
-        LOG_ERROR("Failed to create elements for peer %s", peerId.c_str());
-        if (peerOutput->queue) gst_object_unref(peerOutput->queue);
-        if (peerOutput->converter) gst_object_unref(peerOutput->converter);
-        if (peerOutput->intervideosink) gst_object_unref(peerOutput->intervideosink);
-        return false;
-    }
-    
-    // 3. 속성 설정
-    g_object_set(peerOutput->queue,
-                 "max-size-buffers", 5,
-                 "max-size-time", 1 * GST_SECOND,
-                 "leaky", 2,  // downstream
-                 nullptr);
-    
-    std::string webrtc_channel = "Webrtc_" + 
-        std::string(type_ == CameraType::RGB ? "RGB" : "Thermal") + 
-        "_" + peerId;
-    
-    g_object_set(peerOutput->intervideosink,
-                 "channel", webrtc_channel.c_str(),
-                 nullptr);
-    
-    LOG_INFO("Creating dynamic output with channel: %s", webrtc_channel.c_str());
-    
-    // 4. 파이프라인에 요소 추가 (PAUSED 상태로)
-    gst_element_set_state(peerOutput->queue, GST_STATE_READY);
-    gst_element_set_state(peerOutput->converter, GST_STATE_READY);
-    gst_element_set_state(peerOutput->intervideosink, GST_STATE_READY);
-    
-    if (!gst_bin_add(GST_BIN(pipeline_), peerOutput->queue)) {
-        LOG_ERROR("Failed to add queue to pipeline");
-        return false;
-    }
-    if (!gst_bin_add(GST_BIN(pipeline_), peerOutput->converter)) {
-        LOG_ERROR("Failed to add converter to pipeline");
-        gst_bin_remove(GST_BIN(pipeline_), peerOutput->queue);
-        return false;
-    }
-    if (!gst_bin_add(GST_BIN(pipeline_), peerOutput->intervideosink)) {
-        LOG_ERROR("Failed to add intervideosink to pipeline");
-        gst_bin_remove(GST_BIN(pipeline_), peerOutput->queue);
-        gst_bin_remove(GST_BIN(pipeline_), peerOutput->converter);
-        return false;
-    }
-    
-    // 5. 요소들 연결
-    if (!gst_element_link(peerOutput->queue, peerOutput->converter)) {
-        LOG_ERROR("Failed to link queue to converter");
-        gst_bin_remove(GST_BIN(pipeline_), peerOutput->queue);
-        gst_bin_remove(GST_BIN(pipeline_), peerOutput->converter);
-        gst_bin_remove(GST_BIN(pipeline_), peerOutput->intervideosink);
-        return false;
-    }
-    
-    if (!gst_element_link(peerOutput->converter, peerOutput->intervideosink)) {
-        LOG_ERROR("Failed to link converter to intervideosink");
-        gst_bin_remove(GST_BIN(pipeline_), peerOutput->queue);
-        gst_bin_remove(GST_BIN(pipeline_), peerOutput->converter);
-        gst_bin_remove(GST_BIN(pipeline_), peerOutput->intervideosink);
-        return false;
-    }
-    
-    // 6. Tee와 연결
-    GstPadTemplate* padTemplate = gst_element_class_get_pad_template(
-        GST_ELEMENT_GET_CLASS(elements_.main_tee), "src_%u");
-    
-    if (!padTemplate) {
-        LOG_ERROR("Failed to get tee pad template");
-        gst_bin_remove(GST_BIN(pipeline_), peerOutput->queue);
-        gst_bin_remove(GST_BIN(pipeline_), peerOutput->converter);
-        gst_bin_remove(GST_BIN(pipeline_), peerOutput->intervideosink);
-        return false;
-    }
-    
-    peerOutput->teeSrcPad = gst_element_request_pad(elements_.main_tee, padTemplate, nullptr, nullptr);
-    if (!peerOutput->teeSrcPad) {
-        LOG_ERROR("Failed to request tee src pad");
-        gst_bin_remove(GST_BIN(pipeline_), peerOutput->queue);
-        gst_bin_remove(GST_BIN(pipeline_), peerOutput->converter);
-        gst_bin_remove(GST_BIN(pipeline_), peerOutput->intervideosink);
-        return false;
-    }
-    
-    peerOutput->queueSinkPad = gst_element_get_static_pad(peerOutput->queue, "sink");
-    if (!peerOutput->queueSinkPad) {
-        LOG_ERROR("Failed to get queue sink pad");
-        gst_element_release_request_pad(elements_.main_tee, peerOutput->teeSrcPad);
-        gst_object_unref(peerOutput->teeSrcPad);
-        gst_bin_remove(GST_BIN(pipeline_), peerOutput->queue);
-        gst_bin_remove(GST_BIN(pipeline_), peerOutput->converter);
-        gst_bin_remove(GST_BIN(pipeline_), peerOutput->intervideosink);
-        return false;
-    }
-    
-    // 7. 패드 연결
-    GstPadLinkReturn linkResult = gst_pad_link(peerOutput->teeSrcPad, peerOutput->queueSinkPad);
-    if (linkResult != GST_PAD_LINK_OK) {
-        LOG_ERROR("Failed to link tee to queue: %s (%d)", 
-                  gst_pad_link_get_name(linkResult), linkResult);
-        
-        // 디버깅 정보
-        GstCaps* tee_caps = gst_pad_query_caps(peerOutput->teeSrcPad, nullptr);
-        GstCaps* queue_caps = gst_pad_query_caps(peerOutput->queueSinkPad, nullptr);
-        
-        gchar* tee_caps_str = gst_caps_to_string(tee_caps);
-        gchar* queue_caps_str = gst_caps_to_string(queue_caps);
-        
-        LOG_ERROR("Tee src caps: %s", tee_caps_str);
-        LOG_ERROR("Queue sink caps: %s", queue_caps_str);
-        
-        g_free(tee_caps_str);
-        g_free(queue_caps_str);
-        gst_caps_unref(tee_caps);
-        gst_caps_unref(queue_caps);
-        
-        gst_element_release_request_pad(elements_.main_tee, peerOutput->teeSrcPad);
-        gst_object_unref(peerOutput->teeSrcPad);
-        gst_object_unref(peerOutput->queueSinkPad);
-        gst_bin_remove(GST_BIN(pipeline_), peerOutput->queue);
-        gst_bin_remove(GST_BIN(pipeline_), peerOutput->converter);
-        gst_bin_remove(GST_BIN(pipeline_), peerOutput->intervideosink);
-        return false;
-    }
-    
-    // 8. 상태 동기화
-    if (current_state >= GST_STATE_PAUSED) {
-        LOG_INFO("Syncing state with parent (state: %s)", gst_element_state_get_name(current_state));
-        
-        // 순차적으로 상태 변경
-        gst_element_set_state(peerOutput->queue, GST_STATE_PAUSED);
-        gst_element_set_state(peerOutput->converter, GST_STATE_PAUSED);
-        gst_element_set_state(peerOutput->intervideosink, GST_STATE_PAUSED);
-        
-        if (current_state == GST_STATE_PLAYING) {
-            gst_element_set_state(peerOutput->queue, GST_STATE_PLAYING);
-            gst_element_set_state(peerOutput->converter, GST_STATE_PLAYING);
-            gst_element_set_state(peerOutput->intervideosink, GST_STATE_PLAYING);
-        }
-    }
-
-    // 10. 연결 확인
-    GstStateChangeReturn ret = gst_element_get_state(peerOutput->intervideosink, 
-                                                     nullptr, nullptr, GST_SECOND);
-    if (ret == GST_STATE_CHANGE_SUCCESS) {
-        LOG_INFO("InterVideoSink is in correct state");
-    } else {
-        LOG_WARN("InterVideoSink state change result: %d", ret);
-    }
-    
-    // 9. 저장
-    peerOutputs_[peerId] = std::move(peerOutput);
-    
-    LOG_INFO("Successfully added WebRTC output for camera %d, peer %s: channel=%s", 
-             index_, peerId.c_str(), webrtc_channel.c_str());
-    
-    
-    
+    LOG_INFO("Using fixed WebRTC channel for peer %s", peerId.c_str());
     return true;
 }
 
 // 제거도 패드 블로킹 사용
 bool CameraSource::removePeerOutput(const std::string& peerId) {
-    std::lock_guard<std::mutex> lock(peerOutputsMutex_);
-    
-    auto it = peerOutputs_.find(peerId);
-    if (it == peerOutputs_.end()) {
-        LOG_WARN("Peer output not found: %s", peerId.c_str());
-        return false;
-    }
-    
-    PeerOutput* peerOutput = it->second.get();
-    
-    LOG_INFO("Removing peer output for camera %d: peer=%s", index_, peerId.c_str());
-    
-    // 1. Queue의 sink 패드를 블록
-    if (peerOutput->queueSinkPad) {
-        struct RemoveData {
-            PeerOutput* output;
-            GstElement* pipeline;
-            GstElement* tee;
-            bool completed;
-        };
-        
-        RemoveData removeData = {peerOutput, pipeline_, elements_.main_tee, false};
-        
-        gulong probeId = gst_pad_add_probe(peerOutput->queueSinkPad,
-            GST_PAD_PROBE_TYPE_BLOCK_DOWNSTREAM,
-            [](GstPad* pad, GstPadProbeInfo* info, gpointer userData) -> GstPadProbeReturn {
-                RemoveData* data = static_cast<RemoveData*>(userData);
-                
-                LOG_DEBUG("Pad blocked for removal");
-                
-                // 패드 연결 해제
-                if (data->output->teeSrcPad && data->output->queueSinkPad) {
-                    gst_pad_unlink(data->output->teeSrcPad, data->output->queueSinkPad);
-                }
-                
-                // 요소들을 NULL 상태로
-                gst_element_set_state(data->output->queue, GST_STATE_NULL);
-                gst_element_set_state(data->output->converter, GST_STATE_NULL);
-                gst_element_set_state(data->output->intervideosink, GST_STATE_NULL);
-                
-                // 파이프라인에서 제거
-                gst_bin_remove(GST_BIN(data->pipeline), data->output->queue);
-                gst_bin_remove(GST_BIN(data->pipeline), data->output->converter);
-                gst_bin_remove(GST_BIN(data->pipeline), data->output->intervideosink);
-                
-                // Tee request pad 해제
-                if (data->output->teeSrcPad && data->tee) {
-                    gst_element_release_request_pad(data->tee, data->output->teeSrcPad);
-                    gst_object_unref(data->output->teeSrcPad);
-                }
-                
-                data->completed = true;
-                return GST_PAD_PROBE_REMOVE;
-            },
-            &removeData,
-            nullptr);
-        
-        // 블록 처리 대기
-        g_usleep(50000);  // 50ms
-        
-        if (peerOutput->queueSinkPad) {
-            gst_object_unref(peerOutput->queueSinkPad);
-        }
-    }
-    
-    // 2. 맵에서 제거
-    peerOutputs_.erase(it);
-    
-    LOG_INFO("Successfully removed peer output for camera %d: peer=%s", index_, peerId.c_str());
+    LOG_INFO("Fixed WebRTC channel - nothing to remove for peer %s", peerId.c_str());
     return true;
 }
 
