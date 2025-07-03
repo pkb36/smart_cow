@@ -159,6 +159,9 @@ static void cleanup() {
     
     // 설정 저장
     DeviceSetting::getInstance().save();
+
+    unlink("/tmp/WebRTC_RGB_Camera.sock");
+    unlink("/tmp/WebRTC_Thermal_Camera.sock");
     
     LOG_INFO("Cleanup completed");
 }

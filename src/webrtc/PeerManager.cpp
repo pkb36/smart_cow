@@ -50,35 +50,7 @@ bool PeerManager::addPeer(const std::string& peerId, CameraType source) {
         return false;
     }
     
-    // 포트 할당
-    int streamPort = allocateStreamPort();
-    int commSocket = allocateCommSocket();
-    
-    if (streamPort < 0 || commSocket < 0) {
-        LOG_ERROR("Failed to allocate ports for peer %s", peerId.c_str());
-        if (streamPort >= 0) releaseStreamPort(streamPort);
-        if (commSocket >= 0) releaseCommSocket(commSocket);
-        return false;
-    }
-    
-    // 각 카메라에 대한 UDP 출력 추가
-    const int DEVICE_COUNT = 2;  // RGB + Thermal
-    bool cameraOutputsAdded = true;
-    
-    if (!cameraOutputsAdded) {
-        releaseStreamPort(streamPort);
-        releaseCommSocket(commSocket);
-        return false;
-    }
-    
-    // WebRTC sender 프로세스 생성
-    
-    int streamPortOffset = 0;  // 카메라별 포트 오프셋
-    if (source == CameraType::THERMAL) {
-        streamPortOffset = 1;  // Thermal 카메라는 +1 포트 사용
-    }
-
-    auto sender = std::make_unique<WebRTCSenderProcess>(peerId, streamPort + streamPortOffset, commSocket);
+    auto sender = std::make_unique<WebRTCSenderProcess>(peerId, 5000, 6000);
     
     // 메시지 콜백 설정
     sender->setMessageCallback([this, peerId](const std::string& message) {
@@ -86,26 +58,23 @@ bool PeerManager::addPeer(const std::string& peerId, CameraType source) {
     });
     
     // 프로세스 시작
-    if (!sender->start(DEVICE_COUNT, codecName_)) {
+    if (!sender->start(2, codecName_)) {
         LOG_ERROR("Failed to start WebRTC sender for peer %s", peerId.c_str());
         
         // 카메라 출력 제거
-        for (int camIdx = 0; camIdx < DEVICE_COUNT; camIdx++) {
+        for (int camIdx = 0; camIdx < 2; camIdx++) {
             auto camera = pipeline_->getCamera(camIdx);
             if (camera) {
                 camera->removePeerOutput(peerId);
             }
         }
         
-        releaseStreamPort(streamPort);
-        releaseCommSocket(commSocket);
         return false;
     }
     
     peers_[peerId] = std::move(sender);
     
-    LOG_INFO("Added peer %s (stream_port=%d, comm_port=%d)",
-             peerId.c_str(), streamPort, commSocket);
+    LOG_INFO("Added peer %s", peerId.c_str());
     
     return true;
 }
@@ -125,8 +94,6 @@ bool PeerManager::removePeer(const std::string& peerId) {
         }
         
         // 정보 추출
-        streamPort = it->second->getStreamPort();
-        commPort = it->second->getCommPort();
         senderToDelete = it->second.release();
         
         // 즉시 맵에서 제거
@@ -142,10 +109,6 @@ bool PeerManager::removePeer(const std::string& peerId) {
             }
         }
     }
-    
-    // 포트 해제
-    if (streamPort >= 0) releaseStreamPort(streamPort);
-    if (commPort >= 0) releaseCommSocket(commPort);
     
     // 프로세스 강제 종료 (블로킹 없이)
     if (senderToDelete) {
@@ -341,50 +304,6 @@ void PeerManager::handleIceCandidate(const std::string& peerId, const std::strin
     g_object_unref(builder);
     
     LOG_DEBUG("Forwarded ICE candidate to webrtc_sender for peer %s", peerId.c_str());
-}
-
-// 포트 할당/해제 함수 구현
-int PeerManager::allocateStreamPort() {
-    std::lock_guard<std::mutex> lock(portMutex_);
-    
-    for (size_t i = 0; i < portAllocated_.size(); i++) {
-        if (!portAllocated_[i]) {
-            portAllocated_[i] = true;
-            // 각 피어는 DEVICE_COUNT개의 연속된 포트를 사용
-            return baseStreamPort_ + (i * 2);  // 2 = DEVICE_COUNT
-        }
-    }
-    return -1;  // 사용 가능한 포트 없음
-}
-
-void PeerManager::releaseStreamPort(int port) {
-    std::lock_guard<std::mutex> lock(portMutex_);
-    
-    int index = (port - baseStreamPort_) / 2;  // 2 = DEVICE_COUNT
-    if (index >= 0 && index < static_cast<int>(portAllocated_.size())) {
-        portAllocated_[index] = false;
-    }
-}
-
-int PeerManager::allocateCommSocket() {
-    std::lock_guard<std::mutex> lock(portMutex_);
-    
-    for (size_t i = 0; i < commSocketAllocated_.size(); i++) {
-        if (!commSocketAllocated_[i]) {
-            commSocketAllocated_[i] = true;
-            return commSocketBasePort_ + i;
-        }
-    }
-    return -1;
-}
-
-void PeerManager::releaseCommSocket(int socket) {
-    std::lock_guard<std::mutex> lock(portMutex_);
-    
-    int index = socket - commSocketBasePort_;
-    if (index >= 0 && index < static_cast<int>(commSocketAllocated_.size())) {
-        commSocketAllocated_[index] = false;
-    }
 }
 
 void PeerManager::handlePeerMessage(const std::string& peerId, const std::string& message) {

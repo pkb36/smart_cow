@@ -39,10 +39,6 @@ private:
     void handleIceCandidate(const std::string& peerId, const std::string& candidate, 
                            const std::string& sdpMLineIndex);
     
-    int allocateStreamPort();
-    void releaseStreamPort(int port);
-    int allocateCommSocket();
-    void releaseCommSocket(int socket);
     void handlePeerMessage(const std::string& peerId, const std::string& message);
     void stopAllProcesses();
 private:

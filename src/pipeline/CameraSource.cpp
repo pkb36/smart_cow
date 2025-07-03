@@ -9,6 +9,8 @@
 #include <cmath>
 #include <fstream>
 #include <map>
+#include <sys/stat.h>
+#include <unistd.h>
 
 CameraSource::CameraSource(CameraType type, int index)
     : type_(type)
@@ -248,6 +250,19 @@ bool CameraSource::createInferenceChain(const CameraConfig& config) {
     return true;
 }
 
+void cleanupSocketFile(const char* socket_path) {
+    struct stat st;
+    if (stat(socket_path, &st) == 0) {
+        // 파일이 존재하면 삭제
+        if (unlink(socket_path) == 0) {
+            LOG_INFO("Cleaned up existing socket file: %s", socket_path);
+        } else {
+            LOG_WARN("Failed to remove socket file %s: %s", 
+                     socket_path, strerror(errno));
+        }
+    }
+}
+
 bool CameraSource::linkElements(const CameraConfig& config) {
     if (!pipeline_) {
         LOG_ERROR("Pipeline not set");
@@ -337,23 +352,36 @@ bool CameraSource::linkElements(const CameraConfig& config) {
         gst_bin_add(GST_BIN(pipeline_), main_tee);
         
         gst_element_link(elements_.converter4, main_tee);
+
+        if (type_ == CameraType::RGB) {
+            cleanupSocketFile("/tmp/WebRTC_RGB_Camera.sock");
+        } else {
+            cleanupSocketFile("/tmp/WebRTC_Thermal_Camera.sock");
+        }
         
-        // 2-5. WebRTC Inter 출력 (main_tee에서)
+        // 2-5. WebRTC 출력을 shmsink로 변경 (main_tee에서)
         char webrtc_queue_name[32], webrtc_conv_name[32], webrtc_caps_name[32], webrtc_sink_name[32];
         snprintf(webrtc_queue_name, sizeof(webrtc_queue_name), "webrtc_queue_%d", index_);
         snprintf(webrtc_conv_name, sizeof(webrtc_conv_name), "webrtc_conv_%d", index_);
         snprintf(webrtc_caps_name, sizeof(webrtc_caps_name), "webrtc_caps_%d", index_);
-        snprintf(webrtc_sink_name, sizeof(webrtc_sink_name), "webrtc_sink_%d", index_);
+        snprintf(webrtc_sink_name, sizeof(webrtc_sink_name), "webrtc_shmsink_%d", index_);
 
         GstElement* webrtc_queue = gst_element_factory_make("queue", webrtc_queue_name);
         GstElement* webrtc_conv = gst_element_factory_make("nvvideoconvert", webrtc_conv_name);
         GstElement* webrtc_caps = gst_element_factory_make("capsfilter", webrtc_caps_name);
-        GstElement* webrtc_sink = gst_element_factory_make("intervideosink", webrtc_sink_name);
+        GstElement* webrtc_sink = gst_element_factory_make("shmsink", webrtc_sink_name);
 
-        const char* webrtc_channel = (type_ == CameraType::RGB) ? "Webrtc_RGB_Camera" : "Webrtc_Thermal_Camera";
-        
-        LOG_INFO("Creating intervideosink with channel: %s", webrtc_channel);
+        // shmsink 소켓 경로 설정
+        const char* shm_socket_path = nullptr;
+        if (type_ == CameraType::RGB) {
+            shm_socket_path = "/tmp/WebRTC_RGB_Camera.sock";
+        } else {
+            shm_socket_path = "/tmp/WebRTC_Thermal_Camera.sock";
+        }
 
+        LOG_INFO("Creating shmsink with socket path: %s", shm_socket_path);
+
+        // Caps 설정 (해상도에 따라)
         GstCaps* caps = nullptr;
         if (type_ == CameraType::RGB) {
             caps = gst_caps_new_simple("video/x-raw",
@@ -372,27 +400,31 @@ bool CameraSource::linkElements(const CameraConfig& config) {
         }
         g_object_set(webrtc_caps, "caps", caps, nullptr);
 
-        g_object_set(webrtc_sink, "channel", webrtc_channel, nullptr);
+        // shmsink 속성 설정
+        g_object_set(webrtc_sink, 
+            "socket-path", shm_socket_path,
+            "wait-for-connection", FALSE,
+            "shm-size", 10485760,  // 10MB 공유 메모리
+            "buffer-time", 100000000,  // 100ms
+            "sync", FALSE,
+            nullptr);
+
         g_object_set(webrtc_queue, "max-size-buffers", 5, "leaky", 2, nullptr);
 
-        char capsfilter_name[32];
-        snprintf(capsfilter_name, sizeof(capsfilter_name), "webrtc_capsfilter_%d", index_);
-        GstElement* capsfilter = gst_element_factory_make("capsfilter", capsfilter_name);
-
-       gst_bin_add_many(GST_BIN(pipeline_), webrtc_queue, webrtc_conv, 
-                 webrtc_caps, webrtc_sink, nullptr);
+        gst_bin_add_many(GST_BIN(pipeline_), webrtc_queue, webrtc_conv, 
+                        webrtc_caps, webrtc_sink, nullptr);
 
         // main_tee에서 WebRTC queue로 연결
         GstPad* tee_webrtc_pad = gst_element_get_request_pad(main_tee, "src_%u");
         GstPad* webrtc_queue_sink = gst_element_get_static_pad(webrtc_queue, "sink");
-        
+
         if (gst_pad_link(tee_webrtc_pad, webrtc_queue_sink) != GST_PAD_LINK_OK) {
             LOG_ERROR("Failed to link main_tee to webrtc_queue!");
             gst_object_unref(tee_webrtc_pad);
             gst_object_unref(webrtc_queue_sink);
             return false;
         }
-        
+
         gst_object_unref(tee_webrtc_pad);
         gst_object_unref(webrtc_queue_sink);
 
@@ -405,28 +437,9 @@ bool CameraSource::linkElements(const CameraConfig& config) {
 
         gst_caps_unref(caps);
 
-        LOG_INFO("WebRTC Inter 출력 추가 완료: channel=%s (1280x720)", webrtc_channel);
-        
-        // // 2-6. Fakesink (파이프라인 안정성용)
-        // char fakesink_queue_name[32], fakesink_name[32];
-        // snprintf(fakesink_queue_name, sizeof(fakesink_queue_name), "fakesink_queue_%d", index_);
-        // snprintf(fakesink_name, sizeof(fakesink_name), "fakesink_%d", index_);
-        
-        // GstElement* fakesink_queue = gst_element_factory_make("queue", fakesink_queue_name);
-        // GstElement* fakesink = gst_element_factory_make("fakesink", fakesink_name);
-        
-        // g_object_set(fakesink_queue, "max-size-buffers", 1, "leaky", 2, NULL);
-        // g_object_set(fakesink, "sync", FALSE, NULL);
-        
-        // gst_bin_add_many(GST_BIN(pipeline_), fakesink_queue, fakesink, nullptr);
-        
-        // GstPad* tee_fake_pad = gst_element_get_request_pad(main_tee, "src_%u");
-        // GstPad* fake_queue_sink = gst_element_get_static_pad(fakesink_queue, "sink");
-        // gst_pad_link(tee_fake_pad, fake_queue_sink);
-        // gst_object_unref(tee_fake_pad);
-        // gst_object_unref(fake_queue_sink);
-        
-        // gst_element_link(fakesink_queue, fakesink);
+        LOG_INFO("WebRTC shmsink 출력 추가 완료: socket=%s, resolution=%s", 
+                shm_socket_path,
+                (type_ == CameraType::RGB) ? "1280x720" : "384x288");
 
         elements_.main_tee = main_tee;
         LOG_INFO("추론 체인 연결 완료");
@@ -435,19 +448,34 @@ bool CameraSource::linkElements(const CameraConfig& config) {
     // ========== 3. 추론이 비활성화된 경우 ==========
     else {
         LOG_INFO("추론 비활성화 - 직접 WebRTC 출력");
-        
+    
         // 원본 해상도로 바로 WebRTC 출력
         char webrtc_queue_name[32], webrtc_conv_name[32], webrtc_sink_name[32];
         snprintf(webrtc_queue_name, sizeof(webrtc_queue_name), "webrtc_queue_%d", index_);
         snprintf(webrtc_conv_name, sizeof(webrtc_conv_name), "webrtc_conv_%d", index_);
-        snprintf(webrtc_sink_name, sizeof(webrtc_sink_name), "webrtc_sink_%d", index_);
+        snprintf(webrtc_sink_name, sizeof(webrtc_sink_name), "webrtc_shmsink_%d", index_);
 
         GstElement* webrtc_queue = gst_element_factory_make("queue", webrtc_queue_name);
         GstElement* webrtc_conv = gst_element_factory_make("nvvideoconvert", webrtc_conv_name);
-        GstElement* webrtc_sink = gst_element_factory_make("intervideosink", webrtc_sink_name);
+        GstElement* webrtc_sink = gst_element_factory_make("shmsink", webrtc_sink_name);
 
-        const char* webrtc_channel = (type_ == CameraType::RGB) ? "Webrtc_RGB_Camera" : "Webrtc_Thermal_Camera";
-        g_object_set(webrtc_sink, "channel", webrtc_channel, nullptr);
+        // shmsink 소켓 경로 설정
+        const char* shm_socket_path = nullptr;
+        if (type_ == CameraType::RGB) {
+            shm_socket_path = "/tmp/WebRTC_RGB_Camera.sock";
+        } else {
+            shm_socket_path = "/tmp/WebRTC_Thermal_Camera.sock";
+        }
+        
+        // shmsink 속성 설정
+        g_object_set(webrtc_sink, 
+            "socket-path", shm_socket_path,
+            "wait-for-connection", FALSE,
+            "shm-size", 10485760,  // 10MB 공유 메모리
+            "buffer-time", 100000000,  // 100ms
+            "sync", FALSE,
+            nullptr);
+            
         g_object_set(webrtc_queue, "max-size-buffers", 5, "leaky", 2, nullptr);
 
         gst_bin_add_many(GST_BIN(pipeline_), webrtc_queue, webrtc_conv, webrtc_sink, nullptr);
@@ -471,7 +499,7 @@ bool CameraSource::linkElements(const CameraConfig& config) {
             return false;
         }
 
-        LOG_INFO("WebRTC Inter 출력 추가 완료: channel=%s (원본 해상도)", webrtc_channel);
+        LOG_INFO("WebRTC shmsink 출력 추가 완료: socket=%s (원본 해상도)", shm_socket_path);
     }
     
     LOG_INFO("All elements linked successfully for %s camera",
